@@ -11,3 +11,4 @@ rk3568_camera
 # Compiled test binaries
 tools/isolated_yolov5_test
 tools/isolated_yolov5_test_320
+tools/rga_dmabuf_test

@@ -96,7 +96,6 @@ int main(int argc, char **argv)
         infer_interval = ini_int(cf, "inference", "interval", 1);
         infer_conf = ini_float(cf, "inference", "conf", 0.25f);
         infer_nms  = ini_float(cf, "inference", "nms", 0.45f);
-        infer_interval    = ini_int(cf, "inference", "interval", 5);
         inf_person_only   = ini_bool(cf, "inference", "person_only", true);
         person_conf       = ini_float(cf, "inference", "person_conf", 0.10f);
         inf_smooth        = ini_bool(cf, "inference", "smooth_enable", true);
@@ -218,9 +217,6 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* Init RGA (needed for inference NV12→RGB conversion) */
-    c_RkRgaInit();
-
     /* Display */
     if (use_disp) {
         g_disp = disp_open(1280, 720, n_cams);
@@ -239,6 +235,11 @@ int main(int argc, char **argv)
 
     /* Pipeline */
     g_pipe = pipe_new(n_cams, cam_cfg, use_enc?&enc_cfg:NULL, max_frames);
+
+    /* Init RGA (only when needed for RGA-based NV12→RGB preprocess) */
+    if (model[0] && inf_rga) {
+        c_RkRgaInit();
+    }
 
     /* Set up inference BEFORE pipe_start (threads are spawned in pipe_start) */
     if (model[0]) {
