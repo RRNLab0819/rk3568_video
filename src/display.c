@@ -9,6 +9,7 @@
 #include "display.h"
 #include "shader_yuv.h"
 #include "xdg-shell-client.h"
+#include "fisheye_mesh.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -25,6 +26,14 @@
 #include <GLES2/gl2ext.h>
 #include <drm/drm_fourcc.h>
 #include <pthread.h>
+
+/* ------------------------------------------------------------------ */
+
+typedef enum {
+    DISPLAY_MODE_GRID,           /* original 2x2 quad */
+    DISPLAY_MODE_FISHEYE_GRID,   /* 2x2 fisheye mesh per tile */
+    DISPLAY_MODE_AVM,            /* automotive surround-view layout */
+} display_mode_t;
 
 /* ------------------------------------------------------------------ */
 
@@ -58,6 +67,26 @@ struct display_s {
     GLuint                  texUV[4];
     bool                    has_frame[4];
     bool                    configured;
+
+    /* Display mode (AVM_MODE > FISHEYE_MODE > grid baseline) */
+    display_mode_t mode;
+
+    /* Mesh shader (shared by FISHEYE_GRID and AVM modes) */
+    GLuint      mesh_prog;
+    GLint       mesh_uloc_y, mesh_uloc_uv;  /* cached uniform locations */
+    GLint       mesh_aloc_pos, mesh_aloc_tex; /* cached attribute locations */
+
+    /* Fisheye-grid mesh VBOs (2x2 tile) */
+    GLuint      grid_vbo_pos[4];
+    GLuint      grid_vbo_tex[4];
+    GLuint      grid_ibo[4];
+    int         grid_nidx[4];
+
+    /* AVM-layout mesh VBOs (around vehicle) */
+    GLuint      avm_vbo_pos[4];
+    GLuint      avm_vbo_tex[4];
+    GLuint      avm_ibo[4];
+    int         avm_nidx[4];
 
     /* OSD detection overlay */
     GLuint        osd_prog;
@@ -204,6 +233,93 @@ static void import_nv12(display_t *d, int cam, const frame_t *f)
 
     free(y); free(uv);
     d->has_frame[cam] = true;
+}
+
+/* ------------------------------------------------------------------ */
+/* GLES draw helpers (use osd_prog for flat-color primitives)          */
+/* ------------------------------------------------------------------ */
+
+/* Draw a filled rectangle in NDC space */
+static void draw_filled_rect(display_t *d,
+                              float x0, float y0, float x1, float y1,
+                              float r, float g, float b, float a)
+{
+    float v[] = { x0,y0, x1,y0, x1,y1, x0,y1 };
+    glVertexAttribPointer(d->osd_pos, 2, GL_FLOAT, GL_FALSE, 0, v);
+    glEnableVertexAttribArray(d->osd_pos);
+    glUniform4f(d->osd_color_loc, r, g, b, a);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableVertexAttribArray(d->osd_pos);
+}
+
+/* Draw a line-loop outline rectangle */
+static void draw_outline_rect(display_t *d,
+                               float x0, float y0, float x1, float y1,
+                               float r, float g, float b, float a)
+{
+    float v[] = { x0,y0, x1,y0, x1,y1, x0,y1 };
+    glVertexAttribPointer(d->osd_pos, 2, GL_FLOAT, GL_FALSE, 0, v);
+    glEnableVertexAttribArray(d->osd_pos);
+    glUniform4f(d->osd_color_loc, r, g, b, a);
+    glLineWidth(2.0f);
+    glDrawArrays(GL_LINE_LOOP, 0, 4);
+    glDisableVertexAttribArray(d->osd_pos);
+}
+
+/* Simplified vehicle top-view placeholder: dark body + lighter roof + windshield bar */
+static void draw_vehicle_placeholder(display_t *d, float cx, float cy,
+                                      float body_w, float body_h)
+{
+    float bw2 = body_w * 0.5f, bh2 = body_h * 0.5f;
+
+    /* Body */
+    draw_filled_rect(d, cx - bw2, cy - bh2, cx + bw2, cy + bh2,
+                     0.14f, 0.14f, 0.17f, 1.0f);
+    /* Roof */
+    float rw2 = body_w * 0.55f * 0.5f, rh2 = body_h * 0.40f * 0.5f;
+    draw_filled_rect(d, cx - rw2, cy - rh2, cx + rw2, cy + rh2,
+                     0.26f, 0.26f, 0.30f, 1.0f);
+    /* Windshield */
+    draw_filled_rect(d, cx - rw2 * 0.7f, cy + rh2,
+                        cx + rw2 * 0.7f, cy + rh2 + 0.015f,
+                        0.20f, 0.45f, 0.65f, 1.0f);
+}
+
+/* Left sidebar: dark panel + text placeholder bar + button outlines + dots */
+static void draw_sidebar(display_t *d, float x0, float x1)
+{
+    float y_top = 0.95f, y_bot = -0.95f, m = 0.015f;
+
+    /* Background */
+    draw_filled_rect(d, x0, y_bot, x1, y_top, 0.04f, 0.04f, 0.05f, 1.0f);
+
+    /* Separator line */
+    draw_filled_rect(d, x1 - 0.002f, y_bot, x1 + 0.002f, y_top,
+                     0.16f, 0.16f, 0.18f, 1.0f);
+
+    /* "请注意安全" text placeholder (white bar) */
+    draw_filled_rect(d, x0 + m, 0.85f, x1 - m, 0.92f,
+                     0.85f, 0.85f, 0.85f, 1.0f);
+
+    /* 4 button placeholders with green indicator dots */
+    float bh = 0.055f, gap = 0.018f, by = 0.65f;
+    for (int i = 0; i < 4; i++) {
+        float b0 = by - bh, b1 = by;
+        draw_filled_rect(d, x0 + m, b0, x1 - m, b1, 0.10f, 0.10f, 0.11f, 1.0f);
+        draw_outline_rect(d, x0 + m, b0, x1 - m, b1, 0.22f, 0.22f, 0.24f, 1.0f);
+        draw_filled_rect(d, x0 + m + 0.004f, b0 + 0.008f,
+                            x0 + m + 0.014f, b1 - 0.008f,
+                            0.18f, 0.55f, 0.18f, 1.0f);
+        by = b0 - gap;
+    }
+
+    /* Bottom indicator dots */
+    float dy = -0.65f;
+    for (int i = 0; i < 4; i++) {
+        draw_filled_rect(d, x0 + 0.025f, dy, x0 + 0.045f, dy + 0.025f,
+                         0.25f, 0.25f, 0.55f, 1.0f);
+        dy -= 0.045f;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -355,6 +471,178 @@ display_t *disp_open(int width, int height, int n_cameras)
     glDeleteShader(vs);
     glDeleteShader(fs);
 
+    /* ---- Display mode selection (AVM_MODE > FISHEYE_MODE > grid) ---- */
+    {
+        const char *avm = getenv("AVM_MODE");
+        const char *fm  = getenv("FISHEYE_MODE");
+        if (avm && avm[0] == '1')
+            d->mode = DISPLAY_MODE_AVM;
+        else if (fm && fm[0] == '1')
+            d->mode = DISPLAY_MODE_FISHEYE_GRID;
+        else
+            d->mode = DISPLAY_MODE_GRID;
+    }
+
+    /* ---- Compile mesh shader (shared by FISHEYE_GRID and AVM) ---- */
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID || d->mode == DISPLAY_MODE_AVM) {
+        d->mesh_prog = glCreateProgram();
+        { GLuint v = compile_shader(GL_VERTEX_SHADER, vert_src);
+          GLuint f = compile_shader(GL_FRAGMENT_SHADER, frag_src);
+          glAttachShader(d->mesh_prog, v);
+          glAttachShader(d->mesh_prog, f);
+          glLinkProgram(d->mesh_prog);
+          glDeleteShader(v); glDeleteShader(f); }
+        /* Cache locations once — no per-frame glGet*Location calls */
+        d->mesh_uloc_y   = glGetUniformLocation(d->mesh_prog, "u_texY");
+        d->mesh_uloc_uv  = glGetUniformLocation(d->mesh_prog, "u_texUV");
+        d->mesh_aloc_pos = glGetAttribLocation(d->mesh_prog, "a_pos");
+        d->mesh_aloc_tex = glGetAttribLocation(d->mesh_prog, "a_tex");
+    }
+
+    /* ---- Per-camera params: FOV, rotate, flip (env overrides) ---- */
+    float fov_cam[4]    = { 124.0f, 155.0f, 161.0f, 170.0f };
+    int   rot_cam[4]    = { 0, 0, 0, 0 };
+    bool  flipx_cam[4]  = { false, false, false, false };
+    bool  flipy_cam[4]  = { false, false, false, false };
+
+    const char *ff = getenv("FISHEYE_FOV");
+    if (ff) {
+        char buf[64]; strncpy(buf, ff, 63); buf[63] = 0;
+        char *tok = strtok(buf, ",");
+        for (int j = 0; j < 4 && tok; j++, tok = strtok(NULL, ","))
+            fov_cam[j] = atof(tok);
+    }
+    const char *fr = getenv("FISHEYE_ROTATE");
+    if (fr) {
+        char buf[64]; strncpy(buf, fr, 63); buf[63] = 0;
+        char *tok = strtok(buf, ",");
+        for (int j = 0; j < 4 && tok; j++, tok = strtok(NULL, ","))
+            rot_cam[j] = atoi(tok);
+    }
+    const char *ffx = getenv("FISHEYE_FLIPX");
+    if (ffx) {
+        char buf[64]; strncpy(buf, ffx, 63); buf[63] = 0;
+        char *tok = strtok(buf, ",");
+        for (int j = 0; j < 4 && tok; j++, tok = strtok(NULL, ","))
+            flipx_cam[j] = (atoi(tok) != 0);
+    }
+    const char *ffy = getenv("FISHEYE_FLIPY");
+    if (ffy) {
+        char buf[64]; strncpy(buf, ffy, 63); buf[63] = 0;
+        char *tok = strtok(buf, ",");
+        for (int j = 0; j < 4 && tok; j++, tok = strtok(NULL, ","))
+            flipy_cam[j] = (atoi(tok) != 0);
+    }
+
+    /* Debug: single camera fullscreen */
+    const char *fdc = getenv("FISHEYE_DEBUG_CAM");
+    int debug_cam = fdc ? atoi(fdc) : -1;
+    if (debug_cam >= 0 && debug_cam < d->n_cams) {
+        printf("[display] DEBUG: single camera %d fullscreen\n", debug_cam);
+    }
+
+    /* ---- Build meshes ---- */
+    fisheye_uv_stats_t uv_stats[4];
+
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
+        int cols = (d->n_cams <= 2) ? d->n_cams : 2;
+        int rows = (d->n_cams <= 2) ? 1 : 2;
+        float qw = 2.0f / cols, qh = 2.0f / rows;
+
+        printf("[display] fisheye grid params:\n");
+        for (int i = 0; i < d->n_cams; i++) {
+            int col = (debug_cam >= 0) ? 0 : i % cols;
+            int row = (debug_cam >= 0) ? 0 : i / cols;
+            float x0 = -1.0f + col * ((debug_cam >= 0) ? 2.0f : qw);
+            float y0 =  1.0f - (row + 1) * ((debug_cam >= 0) ? 2.0f : qh);
+            float tw = (debug_cam >= 0) ? 2.0f : qw;
+            float th = (debug_cam >= 0) ? 2.0f : qh;
+
+            printf("  cam%d: fov=%.0f rot=%d flip=%d,%d rect=[%.2f,%.2f,%.2f,%.2f]\n",
+                   i, fov_cam[i], rot_cam[i], flipx_cam[i], flipy_cam[i],
+                   x0, y0, tw, th);
+
+            fisheye_mesh_t m;
+            if (fisheye_mesh_build_ex(&m, &g_fisheye_cams[i],
+                                      x0, y0, tw, th,
+                                      (debug_cam >= 0) ? 1920 : 960,
+                                      (debug_cam >= 0) ? 1080 : 540,
+                                      fov_cam[i],
+                                      rot_cam[i], flipx_cam[i], flipy_cam[i],
+                                      &uv_stats[i]) == 0) {
+                /* Dump UV debug PPM (before debug_cam skip, so all cams get PPM) */
+                { char path[64];
+                  snprintf(path, sizeof(path), "/tmp/fisheye_cam%d_uv.ppm", i);
+                  fisheye_mesh_dump_uv_debug(path, &uv_stats[i], &g_fisheye_cams[i],
+                                             fov_cam[i], 640, 360,
+                                             rot_cam[i], flipx_cam[i], flipy_cam[i]); }
+
+                if (debug_cam >= 0 && i != debug_cam) continue;
+                d->grid_vbo_pos[i] = m.vbo_pos;
+                d->grid_vbo_tex[i] = m.vbo_tex;
+                d->grid_ibo[i]     = m.ibo;
+                d->grid_nidx[i]    = m.num_indices;
+            }
+        }
+        printf("[display] fisheye grid mode ON (%d cameras)\n", d->n_cams);
+    }
+
+    if (d->mode == DISPLAY_MODE_AVM) {
+        const float sb_w  = 0.24f;
+        const float mx0   = -1.0f + sb_w;
+        const float mx1   =  1.0f;
+        const float mh    = 2.0f;
+        const float mcx   = (mx0 + mx1) * 0.5f;
+        const float mcy   = 0.0f;
+        const float veh_w = 0.10f;
+        const float veh_h = 0.18f;
+
+        float tiles[4][4] = {
+            { mcx - veh_w,  mcy + veh_h,       mcx + veh_w,  mcy + veh_h + mh * 0.38f },
+            { mcx + veh_w,  mcy - veh_h * 0.5f, mx1,          mcy + veh_h * 0.5f },
+            { mcx - veh_w,  mcy - veh_h - mh * 0.38f, mcx + veh_w,  mcy - veh_h },
+            { mx0,          mcy - veh_h * 0.5f, mcx - veh_w,  mcy + veh_h * 0.5f },
+        };
+
+        printf("[display] AVM params:\n");
+        for (int i = 0; i < d->n_cams; i++) {
+            float tx0, ty0, tw, th;
+            if (debug_cam >= 0) {
+                tx0 = -1.0f; ty0 = -1.0f; tw = 2.0f; th = 2.0f;
+            } else {
+                tx0 = tiles[i][0]; ty0 = tiles[i][1];
+                tw  = tiles[i][2] - tx0;
+                th  = tiles[i][3] - ty0;
+            }
+
+            printf("  cam%d: fov=%.0f rot=%d flip=%d,%d rect=[%.2f,%.2f,%.2f,%.2f]\n",
+                   i, fov_cam[i], rot_cam[i], flipx_cam[i], flipy_cam[i],
+                   tx0, ty0, tw, th);
+
+            fisheye_mesh_t m;
+            if (fisheye_mesh_build_ex(&m, &g_fisheye_cams[i],
+                                      tx0, ty0, tw, th,
+                                      (debug_cam >= 0) ? 1920 : 480,
+                                      (debug_cam >= 0) ? 1080 : 360,
+                                      fov_cam[i],
+                                      rot_cam[i], flipx_cam[i], flipy_cam[i],
+                                      &uv_stats[i]) == 0) {
+                { char path[64];
+                  snprintf(path, sizeof(path), "/tmp/fisheye_cam%d_uv.ppm", i);
+                  fisheye_mesh_dump_uv_debug(path, &uv_stats[i], &g_fisheye_cams[i],
+                                             fov_cam[i], 640, 360,
+                                             rot_cam[i], flipx_cam[i], flipy_cam[i]); }
+
+                if (debug_cam >= 0 && i != debug_cam) continue;
+                d->avm_vbo_pos[i] = m.vbo_pos;
+                d->avm_vbo_tex[i] = m.vbo_tex;
+                d->avm_ibo[i]     = m.ibo;
+                d->avm_nidx[i]    = m.num_indices;
+            }
+        }
+        printf("[display] AVM mode ON (%d cameras)\n", d->n_cams);
+    }
+
     /* OSD program (flat color for detection boxes) */
     d->osd_prog = glCreateProgram();
     { GLuint v = compile_shader(GL_VERTEX_SHADER, osd_vert);
@@ -422,107 +710,197 @@ void disp_update(display_t *d, int cam_idx, const frame_t *f)
 }
 
 /*
- * Render the current frame to the window.
- *
- * Layout: cameras arranged in a 2x2 grid.  Missing cameras (no frame
- * received yet) are silently skipped.
+ * Render one camera tile using the mesh program + VBOs.
+ * Uses cached uniform/attribute locations for zero per-frame lookup cost.
+ * d->mesh_prog must already be active (glUseProgram called by caller).
  */
-void disp_draw(display_t *d)
+static void draw_mesh_tile(display_t *d, int i,
+                            GLuint vbo_pos, GLuint vbo_tex,
+                            GLuint ibo, int nidx)
 {
-    if (!d)
-        return;
+    if (!d->has_frame[i]) return;
 
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, d->texY[i]);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, d->texUV[i]);
+    glUniform1i(d->mesh_uloc_y, 0);
+    glUniform1i(d->mesh_uloc_uv, 1);
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_pos);
+    glVertexAttribPointer(d->mesh_aloc_pos, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(d->mesh_aloc_pos);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_tex);
+    glVertexAttribPointer(d->mesh_aloc_tex, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(d->mesh_aloc_tex);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glDrawElements(GL_TRIANGLES, nidx, GL_UNSIGNED_SHORT, 0);
+    glDisableVertexAttribArray(d->mesh_aloc_pos);
+    glDisableVertexAttribArray(d->mesh_aloc_tex);
+}
+
+/* ---- Mode-specific draw functions ---- */
+
+static void draw_grid_mode(display_t *d)
+{
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(d->program);
     glViewport(0, 0, d->w, d->h);
 
     int cols = (d->n_cams <= 2) ? d->n_cams : 2;
     int rows = (d->n_cams <= 2) ? 1 : 2;
-    float qw = 2.0f / cols;   /* quad width in clip space */
-    float qh = 2.0f / rows;   /* quad height in clip space */
+    float qw = 2.0f / cols, qh = 2.0f / rows;
 
-    GLint u_texY  = glGetUniformLocation(d->program, "u_texY");
-    GLint u_texUV = glGetUniformLocation(d->program, "u_texUV");
+    GLint uy  = glGetUniformLocation(d->program, "u_texY");
+    GLint uuv = glGetUniformLocation(d->program, "u_texUV");
 
     for (int i = 0; i < d->n_cams; i++) {
-        if (!d->has_frame[i])
-            continue;
+        if (!d->has_frame[i]) continue;
+        int col = i % cols, row = i / cols;
+        float x0 = -1.0f + col * qw, x1 = x0 + qw;
+        float y1 =  1.0f - row * qh, y0 = y1 - qh;
 
-        int col = i % cols;
-        int row = i / cols;
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d->texY[i]);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, d->texUV[i]);
+        glUniform1i(uy, 0); glUniform1i(uuv, 1);
 
-        /* Quad in clip space: x,y ∈ [-1, 1], row 0 = top */
-        float x0 = -1.0f + col * qw;
-        float x1 = x0 + qw;
-        float y1 =  1.0f - row * qh;       /* top edge */
-        float y0 = y1 - qh;                /* bottom edge */
-
-        /* Bind the textures that were populated by import_nv12 */
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, d->texY[i]);
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, d->texUV[i]);
-
-        glUniform1i(u_texY, 0);
-        glUniform1i(u_texUV, 1);
-
-        /* Quad vertices interleaved: [pos2, tex2] */
-        float verts[] = {
-            x0, y0,  0.0f, 0.0f,   /* bottom-left  */
-            x1, y0,  1.0f, 0.0f,   /* bottom-right */
-            x1, y1,  1.0f, 1.0f,   /* top-right    */
-            x0, y1,  0.0f, 1.0f,   /* top-left     */
-        };
-        glVertexAttribPointer(d->loc_pos, 2, GL_FLOAT, GL_FALSE,
-                              4 * sizeof(float), verts);
-        glVertexAttribPointer(d->loc_tex, 2, GL_FLOAT, GL_FALSE,
-                              4 * sizeof(float), verts + 2);
+        float v[] = { x0,y0,0,0, x1,y0,1,0, x1,y1,1,1, x0,y1,0,1 };
+        glVertexAttribPointer(d->loc_pos, 2, GL_FLOAT, GL_FALSE, 16, v);
+        glVertexAttribPointer(d->loc_tex, 2, GL_FLOAT, GL_FALSE, 16, v + 2);
         glEnableVertexAttribArray(d->loc_pos);
         glEnableVertexAttribArray(d->loc_tex);
         glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
         glDisableVertexAttribArray(d->loc_pos);
         glDisableVertexAttribArray(d->loc_tex);
     }
+    /* Detection overlay handled by caller */
+}
 
-    /* Draw detection boxes per channel in each tile */
-    pthread_mutex_lock(&d->det_lock);
+static void draw_fisheye_grid_mode(display_t *d)
+{
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(d->mesh_prog);
+    glViewport(0, 0, d->w, d->h);
+
+    for (int i = 0; i < d->n_cams; i++) {
+        draw_mesh_tile(d, i,
+                       d->grid_vbo_pos[i], d->grid_vbo_tex[i],
+                       d->grid_ibo[i], d->grid_nidx[i]);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+static void draw_avm_mode(display_t *d)
+{
+    /* Black background */
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(0, 0, d->w, d->h);
+
+    /* Sidebar */
+    const float sb_x0 = -1.0f, sb_x1 = -1.0f + 0.24f;
     glUseProgram(d->osd_prog);
-    glLineWidth(3.0f);
+    draw_sidebar(d, sb_x0, sb_x1);
 
-    static const float ch_colors[4][4] = {
-        {1.0f, 0.0f, 0.0f, 1.0f},  /* ch0: red */
-        {0.0f, 1.0f, 0.0f, 1.0f},  /* ch1: green */
-        {0.0f, 0.0f, 1.0f, 1.0f},  /* ch2: blue */
-        {1.0f, 1.0f, 0.0f, 1.0f},  /* ch3: yellow */
-    };
+    /* 4 fisheye-corrected camera views */
+    glUseProgram(d->mesh_prog);
+    for (int i = 0; i < d->n_cams; i++) {
+        draw_mesh_tile(d, i,
+                       d->avm_vbo_pos[i], d->avm_vbo_tex[i],
+                       d->avm_ibo[i], d->avm_nidx[i]);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
-    for (int cam = 0; cam < d->n_cams && cam < 4; cam++) {
-        if (!d->has_frame[cam]) continue;
-        if (d->det_count[cam] <= 0) continue;
+    /* Vehicle placeholder at center of main area */
+    const float mcx = (sb_x1 + 1.0f) * 0.5f, mcy = 0.0f;
+    glUseProgram(d->osd_prog);
+    draw_vehicle_placeholder(d, mcx, mcy, 0.12f, 0.22f);
+}
 
-        int col = cam % cols, row = cam / cols;
-        float tx0 = -1.0f + col * qw;
-        float ty1 =  1.0f - row * qh;
-        float xs = qw / 1920.0f;
-        float ys = qh / 1080.0f;
+/*
+ * Render the current frame to the window.
+ */
+void disp_draw(display_t *d)
+{
+    if (!d) return;
 
-        glUniform4fv(d->osd_color_loc, 1, ch_colors[cam]);
+    switch (d->mode) {
+    case DISPLAY_MODE_GRID:          draw_grid_mode(d);         break;
+    case DISPLAY_MODE_FISHEYE_GRID:  draw_fisheye_grid_mode(d); break;
+    case DISPLAY_MODE_AVM:           draw_avm_mode(d);          break;
+    }
 
-        for (int i = 0; i < d->det_count[cam]; i++) {
-            detection_t *dt = &d->dets[cam][i];
-            if (dt->class_id != 0) continue;  /* person only */
-            float bx = tx0 + dt->x * xs;
-            float by = ty1 - (dt->y + dt->h) * ys;
-            float bw = dt->w * xs;
-            float bh = dt->h * ys;
-            float verts[] = { bx,by, bx+bw,by, bx+bw,by+bh, bx,by+bh };
-            glVertexAttribPointer(d->osd_pos, 2, GL_FLOAT, GL_FALSE, 0, verts);
-            glEnableVertexAttribArray(d->osd_pos);
-            glDrawArrays(GL_LINE_LOOP, 0, 4);
-            glDisableVertexAttribArray(d->osd_pos);
+    /* Detection overlay (grid modes only — AVM can add later) */
+    if (d->mode != DISPLAY_MODE_AVM) {
+        int cols = (d->n_cams <= 2) ? d->n_cams : 2;
+        int rows = (d->n_cams <= 2) ? 1 : 2;
+        float qw = 2.0f / cols, qh = 2.0f / rows;
+
+        pthread_mutex_lock(&d->det_lock);
+        glUseProgram(d->osd_prog);
+        glLineWidth(3.0f);
+
+        static const float ch_colors[4][4] = {
+            {1,0,0,1}, {0,1,0,1}, {0,0,1,1}, {1,1,0,1},
+        };
+        for (int cam = 0; cam < d->n_cams && cam < 4; cam++) {
+            if (!d->has_frame[cam] || d->det_count[cam] <= 0) continue;
+
+            int col = cam % cols, row = cam / cols;
+            float tx0 = -1.0f + col * qw;
+            float ty1 =  1.0f - row * qh;
+            float xs = qw / 1920.0f, ys = qh / 1080.0f;
+
+            glUniform4fv(d->osd_color_loc, 1, ch_colors[cam]);
+            for (int i = 0; i < d->det_count[cam]; i++) {
+                detection_t *dt = &d->dets[cam][i];
+                if (dt->class_id != 0) continue;
+                float bx = tx0 + dt->x * xs;
+                float by = ty1 - (dt->y + dt->h) * ys;
+                float bw = dt->w * xs, bh = dt->h * ys;
+                float v[] = { bx,by, bx+bw,by, bx+bw,by+bh, bx,by+bh };
+                glVertexAttribPointer(d->osd_pos, 2, GL_FLOAT, GL_FALSE, 0, v);
+                glEnableVertexAttribArray(d->osd_pos);
+                glDrawArrays(GL_LINE_LOOP, 0, 4);
+                glDisableVertexAttribArray(d->osd_pos);
+            }
+        }
+        pthread_mutex_unlock(&d->det_lock);
+    }
+
+    /* ---- Live frame grab (FISHEYE_LIVE_DUMP=1) ---- */
+    {
+        static int live_frame_seq = 0;
+        static int live_dump_checked = 0;
+        static int live_dump_enabled = 0;
+        if (!live_dump_checked) {
+            const char *ld = getenv("FISHEYE_LIVE_DUMP");
+            live_dump_enabled = (ld && ld[0] == '1');
+            live_dump_checked = 1;
+        }
+        if (live_dump_enabled && live_frame_seq < 1) {
+            int w = d->w, h = d->h;
+            unsigned char *px = (unsigned char *)malloc(w * h * 3);
+            if (px) {
+                glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
+                /* glReadPixels gives bottom-up; flip for PPM */
+                char path[64];
+                snprintf(path, sizeof(path), "/tmp/fisheye_live_%04d.ppm", live_frame_seq);
+                FILE *fp = fopen(path, "wb");
+                if (fp) {
+                    fprintf(fp, "P6\n%d %d\n255\n", w, h);
+                    for (int y = h - 1; y >= 0; y--)
+                        fwrite(px + y * w * 3, 1, w * 3, fp);
+                    fclose(fp);
+                    printf("[display] live frame saved: %s (%dx%d)\n", path, w, h);
+                }
+                free(px);
+                live_frame_seq++;
+            }
         }
     }
-    pthread_mutex_unlock(&d->det_lock);
 
     eglSwapBuffers(d->egl_dpy, d->egl_surf);
 }
@@ -565,6 +943,17 @@ void disp_close(display_t *d)
     }
     glDeleteProgram(d->program);
     glDeleteProgram(d->osd_prog);
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID || d->mode == DISPLAY_MODE_AVM) {
+        glDeleteProgram(d->mesh_prog);
+    }
+    for (int i = 0; i < d->n_cams; i++) {
+        if (d->grid_vbo_pos[i]) glDeleteBuffers(1, &d->grid_vbo_pos[i]);
+        if (d->grid_vbo_tex[i]) glDeleteBuffers(1, &d->grid_vbo_tex[i]);
+        if (d->grid_ibo[i])     glDeleteBuffers(1, &d->grid_ibo[i]);
+        if (d->avm_vbo_pos[i])  glDeleteBuffers(1, &d->avm_vbo_pos[i]);
+        if (d->avm_vbo_tex[i])  glDeleteBuffers(1, &d->avm_vbo_tex[i]);
+        if (d->avm_ibo[i])      glDeleteBuffers(1, &d->avm_ibo[i]);
+    }
 
     if (d->egl_dpy != EGL_NO_DISPLAY) {
         eglMakeCurrent(d->egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,

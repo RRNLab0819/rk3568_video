@@ -13,6 +13,14 @@
 
 static pipeline_t *g_pipe = NULL;
 static display_t  *g_disp = NULL;
+static volatile int g_save_frame = 0;
+static int g_save_seq = 0;
+
+static void sigusr_handler(int s)
+{
+    (void)s;
+    g_save_frame = 1;
+}
 
 static void sig_handler(int s)
 {
@@ -64,7 +72,7 @@ static int ini_bool(FILE *f, const char *s, const char *k, int d) {
 int main(int argc, char **argv)
 {
     int n_cams = 4, w = 1920, h = 1080, fps = 25, max_frames = 0;
-    int use_disp = 1, use_enc = 1, codec_h265 = 1;
+    int cam_offset = 0, use_disp = 1, use_enc = 1, codec_h265 = 1;
     char out_pat[256] = "/tmp/cam_%d.h264", model[256] = "";
     int infer_interval = 5;
     float infer_conf = 0.25f, infer_nms = 0.45f;
@@ -114,6 +122,7 @@ int main(int argc, char **argv)
     /* CLI overrides */
     for (int i=1; i<argc; i++) {
         if (!strcmp(argv[i],"-c")&&i+1<argc) n_cams=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--cam")&&i+1<argc) cam_offset=atoi(argv[++i]);
         else if (!strcmp(argv[i],"-n")&&i+1<argc) max_frames=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--no-enc")) use_enc=0;
         else if (!strcmp(argv[i],"--no-disp")) use_disp=0;
@@ -151,6 +160,7 @@ int main(int argc, char **argv)
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
+    signal(SIGUSR1, sigusr_handler);
 
     /* ======== File test-image mode (bypass camera pipeline) ======== */
     if (test_image[0]) {
@@ -227,7 +237,7 @@ int main(int argc, char **argv)
     /* Build configs */
     capture_cfg_t cam_cfg[4];
     for (int i=0; i<n_cams; i++) {
-        snprintf(cam_cfg[i].device, 64, "/dev/video%d", i);
+        snprintf(cam_cfg[i].device, 64, "/dev/video%d", cam_offset + i);
         cam_cfg[i].width=w; cam_cfg[i].height=h; cam_cfg[i].fps=fps;
         cam_cfg[i].format = 0x3231564e;
     }
@@ -278,7 +288,27 @@ int main(int argc, char **argv)
 
     /* Main loop */
     struct timeval last = {0};
+    struct timeval last_snap = {0};
+    gettimeofday(&last_snap, NULL);
+    int snap_interval = 2;  /* auto-save every 2 seconds */
+    int total_snaps = 0;
+    int max_snaps = 25;
+    printf("[main] auto-save every %ds, max %d frames per camera\n",
+           snap_interval, max_snaps);
     while (1) {
+        /* Auto-save check: trigger every snap_interval seconds */
+        if (total_snaps < max_snaps) {
+            struct timeval now_snap;
+            gettimeofday(&now_snap, NULL);
+            long elapsed = (now_snap.tv_sec - last_snap.tv_sec) * 1000000L
+                         + (now_snap.tv_usec - last_snap.tv_usec);
+            if (elapsed >= snap_interval * 1000000L) {
+                g_save_frame = 1;
+                last_snap = now_snap;
+                printf("[main] auto-snap %d/%d\n", total_snaps + 1, max_snaps);
+                total_snaps++;
+            }
+        }
         if (g_disp) {
             disp_dispatch(g_disp);
             /* Push detections to display overlay */
@@ -290,6 +320,33 @@ int main(int argc, char **argv)
                 frame_t f;
                 if (ring_get(r, &f)) {
                     disp_update(g_disp, i, &f);
+                    /* SIGUSR1: save raw NV12 frame to /tmp/ */
+                    if (g_save_frame && f.ptr) {
+                        char path[64];
+                        snprintf(path, sizeof(path),
+                                 "/tmp/chess_cam%d_%02d.nv12", cam_offset + i, g_save_seq);
+                        FILE *fp = fopen(path, "wb");
+                        if (fp) {
+                            int ysz = f.width * f.height;
+                            uint8_t *s = f.ptr;
+                            for (int r = 0; r < f.height; r++) {
+                                fwrite(s, 1, f.width, fp);
+                                s += f.stride;
+                            }
+                            s = (uint8_t*)f.ptr + f.stride * f.height;
+                            for (int r = 0; r < f.height / 2; r++) {
+                                fwrite(s, 1, f.width, fp);
+                                s += f.stride;
+                            }
+                            fclose(fp);
+                            printf("[save] %s (%dx%d)\n", path, f.width, f.height);
+                        }
+                        /* Reset after saving all active cameras (last cam) */
+                        if (i == n_cams - 1) {
+                            g_save_frame = 0;
+                            g_save_seq++;
+                        }
+                    }
                     if (f.fd >= 0) close(f.fd);
                 }
             }

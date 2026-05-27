@@ -12,6 +12,9 @@ static const char vert_src[] =
     "  v_tex = a_tex;\n"
     "}\n";
 
+/* vert_src is shared by both quad mode and fisheye mesh mode.
+ * Mesh mode provides a_pos/a_tex from VBOs instead of hardcoded arrays. */
+
 /* YUV→RGB via BT.601 (copied from AVM texture_y_uv.frag) */
 static const char frag_src[] =
     "#version 100\n"
