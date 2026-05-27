@@ -32,8 +32,19 @@
 typedef enum {
     DISPLAY_MODE_GRID,           /* original 2x2 quad */
     DISPLAY_MODE_FISHEYE_GRID,   /* 2x2 fisheye mesh per tile */
-    DISPLAY_MODE_AVM,            /* automotive surround-view layout */
+    DISPLAY_MODE_OEM_AVM,        /* opt-in OEM-style AVM UI */
 } display_mode_t;
+
+typedef enum {
+    OEM_AVM_SURROUND_MAIN = 0,
+    OEM_AVM_SURROUND_FULL,
+    OEM_AVM_FRONT,
+    OEM_AVM_REAR,
+    OEM_AVM_LEFT,
+    OEM_AVM_RIGHT,
+    OEM_AVM_MULTI,
+    OEM_AVM_VIEW_COUNT
+} oem_avm_view_t;
 
 /* ------------------------------------------------------------------ */
 
@@ -69,8 +80,18 @@ struct display_s {
     bool                    tex_ready[4];
     bool                    configured;
 
-    /* Display mode (AVM_MODE > FISHEYE_MODE > grid baseline) */
+    /* Wayland input for OEM AVM mouse / keyboard switching */
+    struct wl_seat         *seat;
+    struct wl_pointer      *pointer;
+    struct wl_keyboard     *keyboard;
+    double                  pointer_x;
+    double                  pointer_y;
+
+    /* Display mode (OEM_AVM_MODE > FISHEYE_MODE > grid baseline) */
     display_mode_t mode;
+    oem_avm_view_t          oem_view;
+    int                     oem_main_cam;
+    int                     oem_cam_map[4];
 
     /* Mesh shader (shared by FISHEYE_GRID and AVM modes) */
     GLuint      mesh_prog;
@@ -83,11 +104,6 @@ struct display_s {
     GLuint      grid_ibo[4];
     int         grid_nidx[4];
 
-    /* AVM-layout mesh VBOs (around vehicle) */
-    GLuint      avm_vbo_pos[4];
-    GLuint      avm_vbo_tex[4];
-    GLuint      avm_ibo[4];
-    int         avm_nidx[4];
 
     /* OSD detection overlay */
     GLuint        osd_prog;
@@ -142,16 +158,161 @@ static const struct xdg_toplevel_listener xdg_toplevel_listener = {
     .close     = xdg_toplevel_close,
 };
 
-static void registry_handler(void *d, struct wl_registry *reg,
+
+static void oem_avm_set_view(display_t *d, int view)
+{
+    if (!d || d->mode != DISPLAY_MODE_OEM_AVM) return;
+    if (view < 0 || view >= OEM_AVM_VIEW_COUNT) return;
+    if (d->oem_view != (oem_avm_view_t)view) {
+        d->oem_view = (oem_avm_view_t)view;
+        printf("[display] OEM AVM view=%d\n", view);
+    }
+}
+
+static void oem_avm_handle_toolbar_click(display_t *d)
+{
+    if (!d || d->mode != DISPLAY_MODE_OEM_AVM || d->w <= 0 || d->h <= 0) return;
+    const double toolbar_h = d->h * 0.13;
+    if (d->pointer_y < (double)d->h - toolbar_h) return;
+    int idx = (int)(d->pointer_x / ((double)d->w / (double)OEM_AVM_VIEW_COUNT));
+    oem_avm_set_view(d, idx);
+}
+
+static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
+                          struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy)
+{
+    (void)pointer; (void)serial; (void)surface;
+    display_t *d = (display_t *)data;
+    d->pointer_x = wl_fixed_to_double(sx);
+    d->pointer_y = wl_fixed_to_double(sy);
+}
+
+static void pointer_leave(void *data, struct wl_pointer *pointer, uint32_t serial,
+                          struct wl_surface *surface)
+{
+    (void)data; (void)pointer; (void)serial; (void)surface;
+}
+
+static void pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time,
+                           wl_fixed_t sx, wl_fixed_t sy)
+{
+    (void)pointer; (void)time;
+    display_t *d = (display_t *)data;
+    d->pointer_x = wl_fixed_to_double(sx);
+    d->pointer_y = wl_fixed_to_double(sy);
+}
+
+static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial,
+                           uint32_t time, uint32_t button, uint32_t state)
+{
+    (void)pointer; (void)serial; (void)time;
+    if (button == 0x110 && state == WL_POINTER_BUTTON_STATE_PRESSED)
+        oem_avm_handle_toolbar_click((display_t *)data);
+}
+
+static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time,
+                         uint32_t axis, wl_fixed_t value)
+{
+    (void)data; (void)pointer; (void)time; (void)axis; (void)value;
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+    .enter = pointer_enter,
+    .leave = pointer_leave,
+    .motion = pointer_motion,
+    .button = pointer_button,
+    .axis = pointer_axis,
+};
+
+static void keyboard_keymap(void *data, struct wl_keyboard *keyboard, uint32_t format,
+                            int32_t fd, uint32_t size)
+{
+    (void)data; (void)keyboard; (void)format; (void)size;
+    if (fd >= 0) close(fd);
+}
+
+static void keyboard_enter(void *data, struct wl_keyboard *keyboard, uint32_t serial,
+                           struct wl_surface *surface, struct wl_array *keys)
+{
+    (void)data; (void)keyboard; (void)serial; (void)surface; (void)keys;
+}
+
+static void keyboard_leave(void *data, struct wl_keyboard *keyboard, uint32_t serial,
+                           struct wl_surface *surface)
+{
+    (void)data; (void)keyboard; (void)serial; (void)surface;
+}
+
+static void keyboard_key(void *data, struct wl_keyboard *keyboard, uint32_t serial,
+                         uint32_t time, uint32_t key, uint32_t state)
+{
+    (void)keyboard; (void)serial; (void)time;
+    if (state != WL_KEYBOARD_KEY_STATE_PRESSED) return;
+    if (key >= 2 && key <= 8)
+        oem_avm_set_view((display_t *)data, (int)key - 2);
+}
+
+static void keyboard_modifiers(void *data, struct wl_keyboard *keyboard, uint32_t serial,
+                               uint32_t mods_depressed, uint32_t mods_latched,
+                               uint32_t mods_locked, uint32_t group)
+{
+    (void)data; (void)keyboard; (void)serial;
+    (void)mods_depressed; (void)mods_latched; (void)mods_locked; (void)group;
+}
+
+static const struct wl_keyboard_listener keyboard_listener = {
+    .keymap = keyboard_keymap,
+    .enter = keyboard_enter,
+    .leave = keyboard_leave,
+    .key = keyboard_key,
+    .modifiers = keyboard_modifiers,
+};
+
+static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps)
+{
+    display_t *d = (display_t *)data;
+    if ((caps & WL_SEAT_CAPABILITY_POINTER) && !d->pointer) {
+        d->pointer = wl_seat_get_pointer(seat);
+        wl_pointer_add_listener(d->pointer, &pointer_listener, d);
+    } else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && d->pointer) {
+        wl_pointer_destroy(d->pointer);
+        d->pointer = NULL;
+    }
+
+    if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !d->keyboard) {
+        d->keyboard = wl_seat_get_keyboard(seat);
+        wl_keyboard_add_listener(d->keyboard, &keyboard_listener, d);
+    } else if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && d->keyboard) {
+        wl_keyboard_destroy(d->keyboard);
+        d->keyboard = NULL;
+    }
+}
+
+static void seat_name(void *data, struct wl_seat *seat, const char *name)
+{
+    (void)data; (void)seat; (void)name;
+}
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_capabilities,
+    .name = seat_name,
+};
+
+static void registry_handler(void *data, struct wl_registry *reg,
                               uint32_t id, const char *iface, uint32_t ver)
 {
-    (void)d; (void)ver;
+    display_t *d = (display_t *)data;
     if (strcmp(iface, "wl_compositor") == 0)
         g_compositor = (struct wl_compositor *)wl_registry_bind(
             reg, id, &wl_compositor_interface, 1);
     else if (strcmp(iface, "xdg_wm_base") == 0)
         g_wm_base = (struct xdg_wm_base *)wl_registry_bind(
             reg, id, &xdg_wm_base_interface, 1);
+    else if (strcmp(iface, "wl_seat") == 0 && d) {
+        d->seat = (struct wl_seat *)wl_registry_bind(
+            reg, id, &wl_seat_interface, ver > 5 ? 5 : ver);
+        wl_seat_add_listener(d->seat, &seat_listener, d);
+    }
 }
 
 static const struct wl_registry_listener registry_listener = {
@@ -309,43 +470,6 @@ static void draw_vehicle_placeholder(display_t *d, float cx, float cy,
                         0.20f, 0.45f, 0.65f, 1.0f);
 }
 
-/* Left sidebar: dark panel + text placeholder bar + button outlines + dots */
-static void draw_sidebar(display_t *d, float x0, float x1)
-{
-    float y_top = 0.95f, y_bot = -0.95f, m = 0.015f;
-
-    /* Background */
-    draw_filled_rect(d, x0, y_bot, x1, y_top, 0.04f, 0.04f, 0.05f, 1.0f);
-
-    /* Separator line */
-    draw_filled_rect(d, x1 - 0.002f, y_bot, x1 + 0.002f, y_top,
-                     0.16f, 0.16f, 0.18f, 1.0f);
-
-    /* "请注意安全" text placeholder (white bar) */
-    draw_filled_rect(d, x0 + m, 0.85f, x1 - m, 0.92f,
-                     0.85f, 0.85f, 0.85f, 1.0f);
-
-    /* 4 button placeholders with green indicator dots */
-    float bh = 0.055f, gap = 0.018f, by = 0.65f;
-    for (int i = 0; i < 4; i++) {
-        float b0 = by - bh, b1 = by;
-        draw_filled_rect(d, x0 + m, b0, x1 - m, b1, 0.10f, 0.10f, 0.11f, 1.0f);
-        draw_outline_rect(d, x0 + m, b0, x1 - m, b1, 0.22f, 0.22f, 0.24f, 1.0f);
-        draw_filled_rect(d, x0 + m + 0.004f, b0 + 0.008f,
-                            x0 + m + 0.014f, b1 - 0.008f,
-                            0.18f, 0.55f, 0.18f, 1.0f);
-        by = b0 - gap;
-    }
-
-    /* Bottom indicator dots */
-    float dy = -0.65f;
-    for (int i = 0; i < 4; i++) {
-        draw_filled_rect(d, x0 + 0.025f, dy, x0 + 0.045f, dy + 0.025f,
-                         0.25f, 0.25f, 0.55f, 1.0f);
-        dy -= 0.045f;
-    }
-}
-
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
@@ -396,7 +520,7 @@ display_t *disp_open(int width, int height, int n_cameras)
     }
 
     struct wl_registry *reg = wl_display_get_registry(d->display);
-    wl_registry_add_listener(reg, &registry_listener, NULL);
+    wl_registry_add_listener(reg, &registry_listener, d);
     wl_display_roundtrip(d->display);
 
     if (!g_compositor) {
@@ -495,20 +619,20 @@ display_t *disp_open(int width, int height, int n_cameras)
     glDeleteShader(vs);
     glDeleteShader(fs);
 
-    /* ---- Display mode selection (AVM_MODE > FISHEYE_MODE > grid) ---- */
+    /* ---- Display mode selection (OEM_AVM_MODE > FISHEYE_MODE > grid) ---- */
     {
-        const char *avm = getenv("AVM_MODE");
+        const char *oem = getenv("OEM_AVM_MODE");
         const char *fm  = getenv("FISHEYE_MODE");
-        if (avm && avm[0] == '1')
-            d->mode = DISPLAY_MODE_AVM;
+        if (oem && oem[0] == '1')
+            d->mode = DISPLAY_MODE_OEM_AVM;
         else if (fm && fm[0] == '1')
             d->mode = DISPLAY_MODE_FISHEYE_GRID;
         else
             d->mode = DISPLAY_MODE_GRID;
     }
 
-    /* ---- Compile mesh shader (shared by FISHEYE_GRID and AVM) ---- */
-    if (d->mode == DISPLAY_MODE_FISHEYE_GRID || d->mode == DISPLAY_MODE_AVM) {
+    /* ---- Compile mesh shader for fisheye grid only ---- */
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
         d->mesh_prog = glCreateProgram();
         { GLuint v = compile_shader(GL_VERTEX_SHADER, vert_src);
           GLuint f = compile_shader(GL_FRAGMENT_SHADER, frag_src);
@@ -611,61 +735,36 @@ display_t *disp_open(int width, int height, int n_cameras)
         printf("[display] fisheye grid mode ON (%d cameras)\n", d->n_cams);
     }
 
-    if (d->mode == DISPLAY_MODE_AVM) {
-        const float sb_w  = 0.24f;
-        const float mx0   = -1.0f + sb_w;
-        const float mx1   =  1.0f;
-        const float mh    = 2.0f;
-        const float mcx   = (mx0 + mx1) * 0.5f;
-        const float mcy   = 0.0f;
-        const float veh_w = 0.10f;
-        const float veh_h = 0.18f;
-
-        float tiles[4][4] = {
-            { mcx - veh_w,  mcy + veh_h,       mcx + veh_w,  mcy + veh_h + mh * 0.38f },
-            { mcx + veh_w,  mcy - veh_h * 0.5f, mx1,          mcy + veh_h * 0.5f },
-            { mcx - veh_w,  mcy - veh_h - mh * 0.38f, mcx + veh_w,  mcy - veh_h },
-            { mx0,          mcy - veh_h * 0.5f, mcx - veh_w,  mcy + veh_h * 0.5f },
-        };
-
-        printf("[display] AVM params:\n");
-        for (int i = 0; i < d->n_cams; i++) {
-            float tx0, ty0, tw, th;
-            if (debug_cam >= 0) {
-                tx0 = -1.0f; ty0 = -1.0f; tw = 2.0f; th = 2.0f;
-            } else {
-                tx0 = tiles[i][0]; ty0 = tiles[i][1];
-                tw  = tiles[i][2] - tx0;
-                th  = tiles[i][3] - ty0;
-            }
-
-            printf("  cam%d: fov=%.0f rot=%d flip=%d,%d rect=[%.2f,%.2f,%.2f,%.2f]\n",
-                   i, fov_cam[i], rot_cam[i], flipx_cam[i], flipy_cam[i],
-                   tx0, ty0, tw, th);
-
-            fisheye_mesh_t m;
-            if (fisheye_mesh_build_ex(&m, &g_fisheye_cams[i],
-                                      tx0, ty0, tw, th,
-                                      (debug_cam >= 0) ? 1920 : 480,
-                                      (debug_cam >= 0) ? 1080 : 360,
-                                      fov_cam[i],
-                                      rot_cam[i], flipx_cam[i], flipy_cam[i],
-                                      &uv_stats[i]) == 0) {
-                { char path[64];
-                  snprintf(path, sizeof(path), "/tmp/fisheye_cam%d_uv.ppm", i);
-                  fisheye_mesh_dump_uv_debug(path, &uv_stats[i], &g_fisheye_cams[i],
-                                             fov_cam[i], 640, 360,
-                                             rot_cam[i], flipx_cam[i], flipy_cam[i]); }
-
-                if (debug_cam >= 0 && i != debug_cam) continue;
-                d->avm_vbo_pos[i] = m.vbo_pos;
-                d->avm_vbo_tex[i] = m.vbo_tex;
-                d->avm_ibo[i]     = m.ibo;
-                d->avm_nidx[i]    = m.num_indices;
+    d->oem_view = OEM_AVM_SURROUND_MAIN;
+    d->oem_main_cam = 0;
+    for (int i = 0; i < 4; i++) d->oem_cam_map[i] = i;
+    {
+        const char *mv = getenv("OEM_AVM_MAIN_CAM");
+        if (mv) {
+            int cam = atoi(mv);
+            if (cam >= 0 && cam < d->n_cams) d->oem_main_cam = cam;
+        }
+        const char *cm = getenv("OEM_AVM_CAM_MAP");
+        if (cm) {
+            char buf[64]; strncpy(buf, cm, 63); buf[63] = 0;
+            char *tok = strtok(buf, ",");
+            for (int i = 0; i < 4 && tok; i++, tok = strtok(NULL, ",")) {
+                int cam = atoi(tok);
+                if (cam >= 0 && cam < 4) d->oem_cam_map[i] = cam;
             }
         }
-        printf("[display] AVM mode ON (%d cameras)\n", d->n_cams);
+        const char *view = getenv("OEM_AVM_VIEW");
+        if (view) {
+            if (strcmp(view, "surround-full") == 0) d->oem_view = OEM_AVM_SURROUND_FULL;
+            else if (strcmp(view, "front") == 0) d->oem_view = OEM_AVM_FRONT;
+            else if (strcmp(view, "rear") == 0) d->oem_view = OEM_AVM_REAR;
+            else if (strcmp(view, "left") == 0) d->oem_view = OEM_AVM_LEFT;
+            else if (strcmp(view, "right") == 0) d->oem_view = OEM_AVM_RIGHT;
+            else if (strcmp(view, "multi") == 0) d->oem_view = OEM_AVM_MULTI;
+        }
     }
+    if (d->mode == DISPLAY_MODE_OEM_AVM)
+        printf("[display] OEM AVM mode ON view=%d main_cam=%d\n", d->oem_view, d->oem_main_cam);
 
     /* OSD program (flat color for detection boxes) */
     d->osd_prog = glCreateProgram();
@@ -705,6 +804,13 @@ fail:
         eglDestroyContext(d->egl_dpy, d->egl_ctx);
     if (d->egl_dpy != EGL_NO_DISPLAY)
         eglTerminate(d->egl_dpy);
+    if (d->keyboard)
+        wl_keyboard_destroy(d->keyboard);
+    if (d->pointer)
+        wl_pointer_destroy(d->pointer);
+    if (d->seat)
+        wl_seat_destroy(d->seat);
+
     if (d->egl_window)
         wl_egl_window_destroy(d->egl_window);
     if (d->xdg_toplevel)
@@ -815,32 +921,176 @@ static void draw_fisheye_grid_mode(display_t *d)
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
-static void draw_avm_mode(display_t *d)
+static int oem_slot_cam(display_t *d, int slot)
 {
-    /* Black background */
+    if (slot < 0 || slot >= 4) return 0;
+    int cam = d->oem_cam_map[slot];
+    if (cam < 0 || cam >= d->n_cams) cam = slot;
+    if (cam >= d->n_cams) cam = 0;
+    return cam;
+}
+
+static void draw_camera_rect(display_t *d, int cam,
+                             float x0, float y0, float x1, float y1)
+{
+    if (cam < 0 || cam >= d->n_cams || !d->has_frame[cam]) return;
+
+    glUseProgram(d->program);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d->texY[cam]);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, d->texUV[cam]);
+    glUniform1i(glGetUniformLocation(d->program, "u_texY"), 0);
+    glUniform1i(glGetUniformLocation(d->program, "u_texUV"), 1);
+
+    float v[] = { x0,y0,0,0, x1,y0,1,0, x1,y1,1,1, x0,y1,0,1 };
+    glVertexAttribPointer(d->loc_pos, 2, GL_FLOAT, GL_FALSE, 16, v);
+    glVertexAttribPointer(d->loc_tex, 2, GL_FLOAT, GL_FALSE, 16, v + 2);
+    glEnableVertexAttribArray(d->loc_pos);
+    glEnableVertexAttribArray(d->loc_tex);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableVertexAttribArray(d->loc_pos);
+    glDisableVertexAttribArray(d->loc_tex);
+}
+
+static void draw_osd_line(display_t *d, float x0, float y0, float x1, float y1,
+                          float r, float g, float b, float a)
+{
+    float v[] = { x0,y0, x1,y1 };
+    glVertexAttribPointer(d->osd_pos, 2, GL_FLOAT, GL_FALSE, 0, v);
+    glEnableVertexAttribArray(d->osd_pos);
+    glUniform4f(d->osd_color_loc, r, g, b, a);
+    glLineWidth(2.0f);
+    glDrawArrays(GL_LINES, 0, 2);
+    glDisableVertexAttribArray(d->osd_pos);
+}
+
+static void draw_guide_lines(display_t *d, bool rear)
+{
+    (void)rear;
+    glUseProgram(d->osd_prog);
+    const float y0 = -0.68f, y1 = -0.18f, y2 = 0.28f;
+    draw_osd_line(d, -0.45f, y0, -0.20f, y2, 1.0f, 0.78f, 0.18f, 1.0f);
+    draw_osd_line(d,  0.45f, y0,  0.20f, y2, 1.0f, 0.78f, 0.18f, 1.0f);
+    draw_osd_line(d, -0.38f, y1,  0.38f, y1, 1.0f, 0.78f, 0.18f, 1.0f);
+    draw_osd_line(d, -0.25f, 0.05f, 0.25f, 0.05f, 0.95f, 0.20f, 0.20f, 1.0f);
+}
+
+static void draw_oem_icon(display_t *d, int idx, float cx, float cy, float z)
+{
+    const float r = 0.86f, g = 0.94f, b = 1.0f, a = 1.0f;
+    if (idx == OEM_AVM_SURROUND_MAIN || idx == OEM_AVM_SURROUND_FULL) {
+        draw_outline_rect(d, cx - z*0.35f, cy - z*0.45f, cx + z*0.35f, cy + z*0.45f, r,g,b,a);
+        draw_osd_line(d, cx - z*0.65f, cy, cx - z*0.42f, cy, r,g,b,a);
+        draw_osd_line(d, cx + z*0.42f, cy, cx + z*0.65f, cy, r,g,b,a);
+        if (idx == OEM_AVM_SURROUND_FULL)
+            draw_outline_rect(d, cx - z*0.62f, cy - z*0.62f, cx + z*0.62f, cy + z*0.62f, r,g,b,a);
+    } else if (idx == OEM_AVM_FRONT || idx == OEM_AVM_REAR) {
+        draw_outline_rect(d, cx - z*0.28f, cy - z*0.50f, cx + z*0.28f, cy + z*0.50f, r,g,b,a);
+        float dir = (idx == OEM_AVM_FRONT) ? 1.0f : -1.0f;
+        draw_osd_line(d, cx, cy + dir*z*0.72f, cx, cy + dir*z*0.48f, r,g,b,a);
+        draw_osd_line(d, cx, cy + dir*z*0.72f, cx - z*0.16f, cy + dir*z*0.56f, r,g,b,a);
+        draw_osd_line(d, cx, cy + dir*z*0.72f, cx + z*0.16f, cy + dir*z*0.56f, r,g,b,a);
+    } else if (idx == OEM_AVM_LEFT || idx == OEM_AVM_RIGHT) {
+        float dir = (idx == OEM_AVM_RIGHT) ? 1.0f : -1.0f;
+        draw_outline_rect(d, cx - z*0.22f, cy - z*0.45f, cx + z*0.22f, cy + z*0.45f, r,g,b,a);
+        draw_osd_line(d, cx + dir*z*0.70f, cy, cx + dir*z*0.36f, cy, r,g,b,a);
+        draw_osd_line(d, cx + dir*z*0.70f, cy, cx + dir*z*0.52f, cy + z*0.16f, r,g,b,a);
+        draw_osd_line(d, cx + dir*z*0.70f, cy, cx + dir*z*0.52f, cy - z*0.16f, r,g,b,a);
+    } else {
+        draw_outline_rect(d, cx - z*0.55f, cy - z*0.38f, cx - z*0.05f, cy + z*0.38f, r,g,b,a);
+        draw_outline_rect(d, cx + z*0.10f, cy - z*0.38f, cx + z*0.55f, cy + z*0.38f, r,g,b,a);
+    }
+}
+
+static void draw_oem_toolbar(display_t *d)
+{
+    glUseProgram(d->osd_prog);
+    const float y0 = -1.0f, y1 = -0.78f;
+    draw_filled_rect(d, -1.0f, y0, 1.0f, y1, 0.02f, 0.02f, 0.025f, 0.96f);
+    for (int i = 0; i < OEM_AVM_VIEW_COUNT; i++) {
+        float x0 = -1.0f + 2.0f * i / OEM_AVM_VIEW_COUNT;
+        float x1 = -1.0f + 2.0f * (i + 1) / OEM_AVM_VIEW_COUNT;
+        if (i == d->oem_view)
+            draw_filled_rect(d, x0 + 0.01f, y0 + 0.015f, x1 - 0.01f, y1 - 0.015f,
+                             0.72f, 0.04f, 0.06f, 0.95f);
+        if (i > 0)
+            draw_filled_rect(d, x0 - 0.002f, y0 + 0.04f, x0 + 0.002f, y1 - 0.04f,
+                             0.22f, 0.22f, 0.24f, 1.0f);
+        draw_oem_icon(d, i, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 0.105f);
+    }
+}
+
+static void draw_oem_surround_panel(display_t *d, float x0, float y0, float x1, float y1)
+{
+    glUseProgram(d->osd_prog);
+    draw_filled_rect(d, x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 1.0f);
+
+    float w = x1 - x0, h = y1 - y0;
+    float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
+    float car_w = w * 0.18f, car_h = h * 0.42f;
+    float gap = 0.012f;
+
+    draw_camera_rect(d, oem_slot_cam(d, 0), cx - car_w*0.65f, cy + car_h*0.52f + gap,
+                     cx + car_w*0.65f, y1 - gap);
+    draw_camera_rect(d, oem_slot_cam(d, 2), cx - car_w*0.65f, y0 + gap,
+                     cx + car_w*0.65f, cy - car_h*0.52f - gap);
+    draw_camera_rect(d, oem_slot_cam(d, 3), x0 + gap, cy - car_h*0.35f,
+                     cx - car_w*0.65f - gap, cy + car_h*0.35f);
+    draw_camera_rect(d, oem_slot_cam(d, 1), cx + car_w*0.65f + gap, cy - car_h*0.35f,
+                     x1 - gap, cy + car_h*0.35f);
+
+    glUseProgram(d->osd_prog);
+    draw_vehicle_placeholder(d, cx, cy, car_w, car_h);
+    draw_outline_rect(d, x0 + gap, y0 + gap, x1 - gap, y1 - gap,
+                      0.12f, 0.12f, 0.14f, 1.0f);
+}
+
+static void draw_oem_avm_mode(display_t *d)
+{
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glViewport(0, 0, d->w, d->h);
 
-    /* Sidebar */
-    const float sb_x0 = -1.0f, sb_x1 = -1.0f + 0.24f;
-    glUseProgram(d->osd_prog);
-    draw_sidebar(d, sb_x0, sb_x1);
+    const float content_y0 = -0.78f;
+    const float content_y1 =  1.0f;
+    int front = oem_slot_cam(d, 0);
+    int right = oem_slot_cam(d, 1);
+    int rear  = oem_slot_cam(d, 2);
+    int left  = oem_slot_cam(d, 3);
 
-    /* 4 fisheye-corrected camera views */
-    glUseProgram(d->mesh_prog);
-    for (int i = 0; i < d->n_cams; i++) {
-        draw_mesh_tile(d, i,
-                       d->avm_vbo_pos[i], d->avm_vbo_tex[i],
-                       d->avm_ibo[i], d->avm_nidx[i]);
+    switch (d->oem_view) {
+    case OEM_AVM_SURROUND_MAIN:
+        draw_oem_surround_panel(d, -1.0f, content_y0, -0.18f, content_y1);
+        draw_camera_rect(d, d->oem_main_cam, -0.18f, content_y0, 1.0f, content_y1);
+        break;
+    case OEM_AVM_SURROUND_FULL:
+        draw_oem_surround_panel(d, -1.0f, content_y0, 1.0f, content_y1);
+        break;
+    case OEM_AVM_FRONT:
+        draw_camera_rect(d, front, -1.0f, content_y0, 1.0f, content_y1);
+        draw_guide_lines(d, false);
+        break;
+    case OEM_AVM_REAR:
+        draw_camera_rect(d, rear, -1.0f, content_y0, 1.0f, content_y1);
+        draw_guide_lines(d, true);
+        break;
+    case OEM_AVM_LEFT:
+        draw_camera_rect(d, left, -1.0f, content_y0, 1.0f, content_y1);
+        break;
+    case OEM_AVM_RIGHT:
+        draw_camera_rect(d, right, -1.0f, content_y0, 1.0f, content_y1);
+        break;
+    case OEM_AVM_MULTI:
+    default:
+        draw_camera_rect(d, left, -1.0f, content_y0, -0.34f, content_y1);
+        draw_camera_rect(d, front, -0.34f, content_y0, 0.34f, content_y1);
+        draw_camera_rect(d, right, 0.34f, content_y0, 1.0f, content_y1);
+        glUseProgram(d->osd_prog);
+        draw_filled_rect(d, -0.342f, content_y0, -0.338f, content_y1, 0.02f,0.02f,0.02f,1.0f);
+        draw_filled_rect(d,  0.338f, content_y0,  0.342f, content_y1, 0.02f,0.02f,0.02f,1.0f);
+        break;
     }
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
-    /* Vehicle placeholder at center of main area */
-    const float mcx = (sb_x1 + 1.0f) * 0.5f, mcy = 0.0f;
-    glUseProgram(d->osd_prog);
-    draw_vehicle_placeholder(d, mcx, mcy, 0.12f, 0.22f);
+    draw_oem_toolbar(d);
 }
 
 /*
@@ -853,11 +1103,11 @@ void disp_draw(display_t *d)
     switch (d->mode) {
     case DISPLAY_MODE_GRID:          draw_grid_mode(d);         break;
     case DISPLAY_MODE_FISHEYE_GRID:  draw_fisheye_grid_mode(d); break;
-    case DISPLAY_MODE_AVM:           draw_avm_mode(d);          break;
+    case DISPLAY_MODE_OEM_AVM:       draw_oem_avm_mode(d);      break;
     }
 
     /* Detection overlay (grid modes only — AVM can add later) */
-    if (d->mode != DISPLAY_MODE_AVM) {
+    if (d->mode != DISPLAY_MODE_OEM_AVM) {
         int cols = (d->n_cams <= 2) ? d->n_cams : 2;
         int rows = (d->n_cams <= 2) ? 1 : 2;
         float qw = 2.0f / cols, qh = 2.0f / rows;
@@ -967,16 +1217,13 @@ void disp_close(display_t *d)
     }
     glDeleteProgram(d->program);
     glDeleteProgram(d->osd_prog);
-    if (d->mode == DISPLAY_MODE_FISHEYE_GRID || d->mode == DISPLAY_MODE_AVM) {
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
         glDeleteProgram(d->mesh_prog);
     }
     for (int i = 0; i < d->n_cams; i++) {
         if (d->grid_vbo_pos[i]) glDeleteBuffers(1, &d->grid_vbo_pos[i]);
         if (d->grid_vbo_tex[i]) glDeleteBuffers(1, &d->grid_vbo_tex[i]);
         if (d->grid_ibo[i])     glDeleteBuffers(1, &d->grid_ibo[i]);
-        if (d->avm_vbo_pos[i])  glDeleteBuffers(1, &d->avm_vbo_pos[i]);
-        if (d->avm_vbo_tex[i])  glDeleteBuffers(1, &d->avm_vbo_tex[i]);
-        if (d->avm_ibo[i])      glDeleteBuffers(1, &d->avm_ibo[i]);
     }
 
     if (d->egl_dpy != EGL_NO_DISPLAY) {
