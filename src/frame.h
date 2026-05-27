@@ -4,11 +4,14 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 /* ---- Frame descriptor (zero-copy: pass fd, not data) ---- */
 typedef struct {
     int      fd;        /* dma_buf fd from V4L2 EXPBUF */
-    void    *ptr;       /* mmap userspace pointer */
+    void    *ptr;       /* mmap or malloc'd userspace pointer */
+    bool     own_ptr;   /* true if ptr was malloc'd (deep copy) — must free */
     uint32_t size;      /* bytes in buffer */
     uint32_t width;
     uint32_t height;
@@ -25,9 +28,14 @@ typedef struct {
     volatile bool has_new;
 } ring_t;
 
-/* Put: overwrite old frame, set has_new */
+/* Put: overwrite old frame if not yet consumed, set has_new */
 static inline void ring_put(ring_t *r, const frame_t *f)
 {
+    /* If consumer hasn't read the previous frame, clean it up to avoid fd/mem leak */
+    if (r->has_new) {
+        if (r->buf.fd >= 0) close(r->buf.fd);
+        if (r->buf.own_ptr && r->buf.ptr) free(r->buf.ptr);
+    }
     r->buf = *f;
     r->has_new = true;
 }

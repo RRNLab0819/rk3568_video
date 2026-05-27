@@ -120,6 +120,7 @@ int cap_dequeue(capture_t *c, frame_t *f)
     }
     int idx = buf.index;
     c->last_idx = idx;
+    f->own_ptr = false;  /* ptr is V4L2 mmap, not malloc'd */
     f->fd     = (c->dma_fd[idx] >= 0) ? dup(c->dma_fd[idx]) : -1;
     f->ptr    = c->bufs[idx];
     f->size   = buf.m.planes[0].bytesused;
