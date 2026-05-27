@@ -90,6 +90,8 @@ static void *capture_thread(void *arg)
                 gettimeofday(&tv, NULL);
                 fcopy.pts = (int64_t)tv.tv_sec * 1000000LL + tv.tv_usec;
                 fcopy.seq = ch->frame_count;
+                /* Preserve dma_buf fd for RGA preprocess — dup for infer ring */
+                fcopy.fd = (f.fd >= 0) ? dup(f.fd) : -1;
                 ring_put(ch->infer_ring, &fcopy);
             }
         }

@@ -121,6 +121,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i],"-h")&&i+1<argc) h=atoi(argv[++i]);
         else if (!strcmp(argv[i],"-m")&&i+1<argc) strncpy(model,argv[++i],255);
         else if (!strcmp(argv[i],"--test-image")&&i+1<argc) strncpy(test_image,argv[++i],255);
+        else if (!strcmp(argv[i],"--rga")) inf_rga = true;
     }
 
     /* Check NPU frequency (only meaningful when inference is enabled) */

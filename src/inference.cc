@@ -21,12 +21,21 @@
 
 struct inference_s {
     rknn_app_context_t   app_ctx;
-    uint8_t             *rgb_buf;       /* model input size RGB buffer */
-    uint8_t             *nv12_buf;      /* model input size NV12 buffer (RGA dst) */
+    uint8_t             *rgb_buf;       /* model input size RGB buffer (320x320x3) */
+    uint8_t             *nv12_buf;      /* model input size NV12 buffer (320x320x3/2, RGA dst) */
     int                  rgb_size;
     int                  nv12_size;
     float                conf_thresh, nms_thresh;
     bool                 rga_enable;
+
+    /* RGA dma_buf preprocess — pre-allocated at infer_open, reused per frame */
+    rga_buffer_handle_t  dst_nv12_handle;  /* importbuffer_virtualaddr of nv12_buf */
+    int                  mw, mh;           /* model input width/height (320) */
+
+    /* Timing stats */
+    float                rga_ms;
+    float                cpu_nv12_rgb_ms;
+    float                preprocess_total_ms;
 };
 
 /* ------------------------------------------------------------------ */
@@ -456,15 +465,32 @@ extern "C" infer_t *infer_open(const char *model_path, float conf, float nms, bo
     if (!inf->rgb_buf) { free(inf); return NULL; }
 
     /* Pre-allocate NV12 buffer at model input size for RGA resize dst */
-    inf->nv12_size = inf->app_ctx.model_width * inf->app_ctx.model_height * 3 / 2;
+    inf->mw = inf->app_ctx.model_width;
+    inf->mh = inf->app_ctx.model_height;
+    inf->nv12_size = inf->mw * inf->mh * 3 / 2;
     inf->nv12_buf  = (uint8_t *)malloc(inf->nv12_size);
     if (!inf->nv12_buf) { free(inf->rgb_buf); free(inf); return NULL; }
 
+    /* Pre-allocate RGA destination handle (reused across frames) */
+    inf->dst_nv12_handle = 0;
+    if (inf->rga_enable && inf->nv12_buf) {
+        im_handle_param_t dparam;
+        memset(&dparam, 0, sizeof(dparam));
+        dparam.width  = inf->mw;
+        dparam.height = inf->mh;
+        dparam.format = RK_FORMAT_YCbCr_420_SP;
+        inf->dst_nv12_handle = importbuffer_virtualaddr(inf->nv12_buf, &dparam);
+        if (inf->dst_nv12_handle == 0) {
+            fprintf(stderr, "[infer] RGA dst import failed, disabling RGA\n");
+            inf->rga_enable = false;
+        }
+    }
+
     fprintf(stderr, "[infer] ready: model=%s conf=%.2f nms=%.2f "
-            "input=%dx%d rga=%d rgb_buf=%d nv12_buf=%d bytes\n",
+            "input=%dx%d rga=%d dst_handle=0x%lx rgb_buf=%d nv12_buf=%d\n",
             model_path, conf, nms,
-            inf->app_ctx.model_width, inf->app_ctx.model_height,
-            inf->rga_enable, inf->rgb_size, inf->nv12_size);
+            inf->mw, inf->mh, inf->rga_enable,
+            (unsigned long)inf->dst_nv12_handle, inf->rgb_size, inf->nv12_size);
     return inf;
 }
 
@@ -497,19 +523,18 @@ extern "C" int infer_detect_rgb(infer_t *inf, const uint8_t *rgb, int w, int h,
     return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
 }
 
-/* Camera mode: NV12 frame_t → RGA resize+letterbox → CPU NV12→RGB → RKNN */
+/* Camera mode: NV12 frame_t → RGA dma_buf resize+letterbox → CPU NV12→RGB → RKNN */
 extern "C" int infer_detect(infer_t *inf, const frame_t *f,
                             detection_t *dets, int max_dets)
 {
     if (!inf || !f || !f->ptr || !inf->rgb_buf || !inf->nv12_buf) return 0;
 
-    int mw = inf->app_ctx.model_width;
-    int mh = inf->app_ctx.model_height;
+    int mw = inf->mw, mh = inf->mh;
     int fw = (int)f->width, fh = (int)f->height, fs = (int)f->stride;
     letterbox_t lb;
     memset(&lb, 0, sizeof(lb));
 
-    struct timeval _t0, _t1, _t2, _t3;
+    struct timeval _t0, _t2;
     gettimeofday(&_t0, NULL);
 
     /* Compute letterbox params */
@@ -523,34 +548,71 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
     if (y_pad % 2 != 0) { y_pad -= y_pad % 2; if (y_pad < 0) y_pad = 0; }
     lb.scale = scale; lb.x_pad = x_pad; lb.y_pad = y_pad;
 
-    if (inf->rga_enable) {
-        /* RGA path: NV12→NV12 resize + letterbox, then small CPU NV12→RGB */
+    inf->rga_ms = 0;
+    inf->cpu_nv12_rgb_ms = 0;
+
+    if (inf->rga_enable && inf->dst_nv12_handle && f->fd >= 0) {
+        /* === RGA dma_buf path: V4L2 fd → importbuffer_fd → improcess NV12→NV12 === */
+        struct timeval _rga_t0, _rga_t1;
+        gettimeofday(&_rga_t0, NULL);
+
+        /* Fill dst NV12 with letterbox gray */
         memset(inf->nv12_buf, 114, mw * mh);
         memset(inf->nv12_buf + mw * mh, 128, mw * mh / 2);
 
-        rga_buffer_t rga_src = wrapbuffer_virtualaddr((void*)f->ptr,
-                            fw, fh, RK_FORMAT_YCbCr_420_SP, fs, fh);
-        rga_buffer_t rga_dst = wrapbuffer_virtualaddr((void*)inf->nv12_buf,
-                            mw, mh, RK_FORMAT_YCbCr_420_SP, mw, mh);
+        /* Import source dma_buf fd */
+        im_handle_param_t sparam;
+        memset(&sparam, 0, sizeof(sparam));
+        sparam.width  = fw;
+        sparam.height = fh;
+        sparam.format = RK_FORMAT_YCbCr_420_SP;
 
-        im_rect srect = {0, 0, fw, fh};
-        im_rect drect = {x_pad, y_pad, rw, rh};
-        im_rect prect = {0, 0, 0, 0};
-        rga_buffer_t pat;
-        memset(&pat, 0, sizeof(pat));
-
-        IM_STATUS rga_ret = improcess(rga_src, rga_dst, pat,
-                                       srect, drect, prect, 0);
-        gettimeofday(&_t1, NULL);
-
-        static int rga_err_logged = 0;
-        bool rga_ok = (rga_ret == IM_STATUS_SUCCESS);
-        if (!rga_ok && !rga_err_logged) {
-            rga_err_logged = 1;
-            fprintf(stderr, "[infer] RGA fail: %s, using CPU fallback\n",
-                    imStrError(rga_ret));
-        }
+        rga_buffer_handle_t src_h = importbuffer_fd(f->fd, &sparam);
+        bool rga_ok = (src_h != 0);
         if (rga_ok) {
+            rga_buffer_t src = wrapbuffer_handle(src_h, fw, fh,
+                                                  RK_FORMAT_YCbCr_420_SP,
+                                                  fs, fh);
+            rga_buffer_t dst = wrapbuffer_handle(inf->dst_nv12_handle, mw, mh,
+                                                  RK_FORMAT_YCbCr_420_SP,
+                                                  mw, mh);
+
+            im_rect srect = {0, 0, fw, fh};
+            im_rect drect = {x_pad, y_pad, rw, rh};
+            im_rect prect = {0, 0, 0, 0};
+            rga_buffer_t pat;
+            memset(&pat, 0, sizeof(pat));
+
+            IM_STATUS rga_ret = improcess(src, dst, pat, srect, drect, prect, 0);
+            rga_ok = (rga_ret == IM_STATUS_SUCCESS);
+            releasebuffer_handle(src_h);
+
+            if (!rga_ok) {
+                static int rga_fail_logged = 0;
+                if (!rga_fail_logged) {
+                    rga_fail_logged = 1;
+                    fprintf(stderr, "[infer] RGA improcess failed: %d, falling back to CPU\n",
+                            (int)rga_ret);
+                }
+            }
+        } else {
+            static int rga_import_logged = 0;
+            if (!rga_import_logged) {
+                rga_import_logged = 1;
+                fprintf(stderr, "[infer] RGA importbuffer_fd failed (fd=%d), falling back to CPU\n",
+                        f->fd);
+            }
+        }
+
+        gettimeofday(&_rga_t1, NULL);
+        inf->rga_ms = (_rga_t1.tv_sec - _rga_t0.tv_sec)*1000.0f +
+                      (_rga_t1.tv_usec - _rga_t0.tv_usec)/1000.0f;
+
+        if (rga_ok) {
+            /* CPU NV12→RGB from resized 320 NV12 dst */
+            struct timeval _cpu_t0, _cpu_t1;
+            gettimeofday(&_cpu_t0, NULL);
+
             const uint8_t *n12 = inf->nv12_buf;
             uint8_t *rgb = inf->rgb_buf;
             for (int r = 0; r < mh; r++) {
@@ -569,20 +631,35 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
                     drow += 3;
                 }
             }
+
+            gettimeofday(&_cpu_t1, NULL);
+            inf->cpu_nv12_rgb_ms = (_cpu_t1.tv_sec - _cpu_t0.tv_sec)*1000.0f +
+                                   (_cpu_t1.tv_usec - _cpu_t0.tv_usec)/1000.0f;
             gettimeofday(&_t2, NULL);
         } else {
+            /* RGA failed — fallback to full CPU path */
             nv12_letterbox_rgb((const uint8_t *)f->ptr, fw, fh, fs,
                                inf->rgb_buf, mw, mh, &lb);
             gettimeofday(&_t2, NULL);
         }
-    } else {
-        /* CPU-only path: full NV12→RGB letterbox (stable, no RGA dependency) */
+    } else if (inf->rga_enable && f->fd < 0) {
+        /* RGA enabled but no dma_buf fd — CPU fallback */
+        static int nofd_logged = 0;
+        if (!nofd_logged) {
+            nofd_logged = 1;
+            fprintf(stderr, "[infer] no dma_buf fd (fd=%d), using CPU fallback\n", f->fd);
+        }
         nv12_letterbox_rgb((const uint8_t *)f->ptr, fw, fh, fs,
                            inf->rgb_buf, mw, mh, &lb);
-        gettimeofday(&_t1, NULL); _t2 = _t1; /* _t2 unused but set for timing calc */
+        gettimeofday(&_t2, NULL);
+    } else {
+        /* CPU-only path (stable, no RGA dependency) */
+        nv12_letterbox_rgb((const uint8_t *)f->ptr, fw, fh, fs,
+                           inf->rgb_buf, mw, mh, &lb);
+        gettimeofday(&_t2, NULL);
     }
 
-    /* Diagnostic dump */
+    /* Diagnostic dump (first 3 frames) */
     {
         static int dump_count = 0;
         if (dump_count < 3) {
@@ -597,13 +674,15 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
         }
     }
 
-    /* Per-stage timing (every 32nd frame) */
+    /* Preprocess timing (every 32nd frame) */
     {
         static int cnt = 0;
         if ((++cnt & 31) == 0) {
             float prep_ms = (_t2.tv_sec - _t0.tv_sec)*1000.0f + (_t2.tv_usec - _t0.tv_usec)/1000.0f;
-            fprintf(stderr, "[prep] %s %.1f ms\n",
-                    inf->rga_enable ? "rga+cpu" : "cpu_only", prep_ms);
+            inf->preprocess_total_ms = prep_ms;
+            fprintf(stderr, "[prep] %s rga=%.1f cpu=%.1f total=%.1f ms\n",
+                    inf->rga_enable ? "rga+dma_buf" : "cpu_only",
+                    inf->rga_ms, inf->cpu_nv12_rgb_ms, prep_ms);
         }
     }
 
@@ -621,6 +700,8 @@ extern "C" void infer_close(infer_t *inf)
     if (!inf) return;
     free(inf->rgb_buf);
     free(inf->nv12_buf);
+    if (inf->dst_nv12_handle)
+        releasebuffer_handle(inf->dst_nv12_handle);
     if (inf->app_ctx.rknn_ctx)
         rknn_destroy(inf->app_ctx.rknn_ctx);
     free(inf->app_ctx.input_attrs);
