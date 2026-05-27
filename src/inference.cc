@@ -274,6 +274,7 @@ typedef enum {
     BACKEND_CURRENT_RGA,   /* current RGA dma_buf resize→NV12→RGB */
     BACKEND_OPENCV_BGR,    /* OpenCV cvtColor NV12→BGR→resize→letterbox */
     BACKEND_OPENCV_RGB,    /* OpenCV cvtColor NV12→RGB→resize→letterbox */
+    BACKEND_NV21_TEST,     /* NV21→RGB (U/V swapped) to test camera output format */
 } preprocess_backend_t;
 
 static preprocess_backend_t detect_backend(void)
@@ -288,6 +289,7 @@ static preprocess_backend_t detect_backend(void)
     else if (!strcmp(e, "opencv_rgb")) backend = BACKEND_OPENCV_RGB;
     else if (!strcmp(e, "current_cpu")) backend = BACKEND_CURRENT_CPU;
     else if (!strcmp(e, "current_rga")) backend = BACKEND_CURRENT_RGA;
+    else if (!strcmp(e, "nv21_test"))  backend = BACKEND_NV21_TEST;
     fprintf(stderr, "[infer] preprocess backend: %s (%d)\n", e, (int)backend);
     return backend;
 }
@@ -370,6 +372,40 @@ static void opencv_nv12_letterbox(const uint8_t *nv12, int sw, int sh,
 
 /* ================================================================== */
 /* Dump RGB buffer as PPM for visual inspection                        */
+/* ================================================================== */
+/* NV21→RGB letterbox  (U/V swapped — tests if camera outputs NV21)     */
+/* ================================================================== */
+static void nv21_letterbox_rgb(const uint8_t *nv21, int sw, int sh, int sstride,
+                                uint8_t *rgb, int dw, int dh, letterbox_t *lb)
+{
+    uint8_t *full_rgb = (uint8_t *)malloc(sw * sh * 3);
+    if (!full_rgb) return;
+
+    const uint8_t *yplane  = nv21;
+    const uint8_t *uvplane = nv21 + sstride * sh;
+
+    for (int r = 0; r < sh; r++) {
+        const uint8_t *yrow  = yplane  + r * sstride;
+        const uint8_t *uvrow = uvplane + (r / 2) * sstride;
+        uint8_t *drow = full_rgb + r * sw * 3;
+        for (int c = 0; c < sw; c++) {
+            int Y = yrow[c];
+            int V = uvrow[(c / 2) * 2];      /* NV21: V first */
+            int U = uvrow[(c / 2) * 2 + 1];  /* NV21: U second */
+            int C = Y - 16, D = U - 128, E = V - 128;
+            int rv = (298 * C + 409 * E + 128) >> 8;
+            int gv = (298 * C - 100 * D - 208 * E + 128) >> 8;
+            int bv = (298 * C + 516 * D + 128) >> 8;
+            drow[0] = (rv < 0) ? 0 : (rv > 255 ? 255 : rv);
+            drow[1] = (gv < 0) ? 0 : (gv > 255 ? 255 : gv);
+            drow[2] = (bv < 0) ? 0 : (bv > 255 ? 255 : bv);
+            drow += 3;
+        }
+    }
+    rgb_letterbox(full_rgb, sw, sh, rgb, dw, dh, lb, 114);
+    free(full_rgb);
+}
+
 /* ================================================================== */
 static void dump_ppm(const char *path, const uint8_t *rgb, int w, int h)
 {
@@ -654,6 +690,25 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
 
     /* ---- OpenCV backend (bypass RGA/CPU, use cv::cvtColor) ---- */
     preprocess_backend_t backend = detect_backend();
+    if (backend == BACKEND_NV21_TEST) {
+        nv21_letterbox_rgb((const uint8_t *)f->ptr, fw, fh, fs,
+                            inf->rgb_buf, mw, mh, &lb);
+        gettimeofday(&_t2, NULL);
+        {
+            static int nv21_dump = 0;
+            if (nv21_dump < 3) {
+                char path[64];
+                snprintf(path, sizeof(path), "/tmp/input_nv21_test_%d.ppm", nv21_dump);
+                dump_ppm(path, inf->rgb_buf, mw, mh);
+                dump_color_stats("nv21_test", inf->rgb_buf, mw, mh);
+                fprintf(stderr, "[diag] nv21_test dump %d/3: %s scale=%.4f pad=(%d,%d)\n",
+                        nv21_dump + 1, path, lb.scale, lb.x_pad, lb.y_pad);
+                nv21_dump++;
+            }
+        }
+        return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
+    }
+
     if (backend == BACKEND_OPENCV_BGR || backend == BACKEND_OPENCV_RGB) {
         bool to_rgb = (backend == BACKEND_OPENCV_RGB);
         opencv_nv12_letterbox((const uint8_t *)f->ptr, fw, fh,
