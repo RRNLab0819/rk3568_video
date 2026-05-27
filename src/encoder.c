@@ -22,6 +22,8 @@ struct encoder_s {
     MppCtx          ctx;
     MppApi         *mpi;
     MppBufferGroup  group;
+    MppBuffer       in_bufs[4];
+    int             in_idx;
     int             w, h, fps, bitrate, gop;
     size_t          frame_size;
     MppCodingType   coding;
@@ -96,6 +98,18 @@ encoder_t *enc_open(int w, int h, int fps, int bitrate, const char *codec)
         return NULL;
     }
     mpp_buffer_group_limit_config(e->group, e->frame_size, 4);
+    for (int i = 0; i < 4; i++) {
+        ret = mpp_buffer_get(e->group, &e->in_bufs[i], e->frame_size);
+        if (ret != MPP_OK || !e->in_bufs[i]) {
+            for (int j = 0; j < i; j++)
+                mpp_buffer_put(e->in_bufs[j]);
+            mpp_buffer_group_put(e->group);
+            mpp_destroy(e->ctx);
+            free(e);
+            return NULL;
+        }
+    }
+
 
     printf("[enc] %dx%d@%d %s bitrate=%d\n", w, h, fps, codec, e->bitrate);
     return e;
@@ -108,11 +122,11 @@ int enc_feed(encoder_t *e, const frame_t *f, uint8_t **out, size_t *olen)
 
     if (!e || !f || !f->ptr) return -1;
 
-    MppBuffer buf = NULL;
-    if (mpp_buffer_get(e->group, &buf, e->frame_size) != MPP_OK || !buf)
-        return -1;
+    MppBuffer buf = e->in_bufs[e->in_idx];
+    if (!buf) return -1;
+    e->in_idx = (e->in_idx + 1) & 3;
 
-    /* Copy NV12 frame data into MPP buffer, stripping V4L2 stride if needed. */
+    /* Copy NV12 frame data into a persistent MPP input buffer. */
     uint8_t *dst = (uint8_t *)mpp_buffer_get_ptr(buf);
     const uint8_t *src = (const uint8_t *)f->ptr;
     if ((int)f->stride == e->w) {
@@ -144,7 +158,6 @@ int enc_feed(encoder_t *e, const frame_t *f, uint8_t **out, size_t *olen)
 
     MPP_RET ret = e->mpi->encode_put_frame(e->ctx, frame);
     mpp_frame_deinit(&frame);
-    mpp_buffer_put(buf);
 
     if (ret != MPP_OK) return -1;
 
@@ -185,6 +198,12 @@ void enc_close(encoder_t *e)
     }
 
     e->mpi->reset(e->ctx);
+    for (int i = 0; i < 4; i++) {
+        if (e->in_bufs[i]) {
+            mpp_buffer_put(e->in_bufs[i]);
+            e->in_bufs[i] = NULL;
+        }
+    }
     mpp_destroy(e->ctx);
     if (e->group) mpp_buffer_group_put(e->group);
     free(e);

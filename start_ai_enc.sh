@@ -1,7 +1,7 @@
 #!/bin/sh
-# RK3568 4-Channel + AI Display
+# RK3568 4-Channel + AI Person Detection
 # Requires: /userdata/yolov5.rknn model file
-# Usage: /userdata/start_ai.sh
+# Usage: /userdata/start_ai_enc.sh
 
 BIN=/userdata/rk3568_camera
 MODEL=/userdata/yolov5.rknn
@@ -26,6 +26,6 @@ fi
 # ---- 3. Launch with AI enabled ----
 echo "[ai] model=$MODEL"
 echo "[ai] launching $BIN ..."
-cd /userdata && LD_LIBRARY_PATH=/usr/lib $BIN -m "$MODEL" -c 4 --no-enc
+cd /userdata && LD_LIBRARY_PATH=/usr/lib $BIN -m "$MODEL" -c 4
 
 echo "[ai] exited"

@@ -559,7 +559,7 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
 
         /* Direct decode — person-only (class 0). Skip scanning 79 other classes. */
         int candidates = 0;
-        for (int i = 0; i < n_dets && candidates < MAX_DETECTIONS * 4; i++) {
+        for (int i = 0; i < n_dets && candidates < MAX_DETECTIONS; i++) {
             int off = i * n_props;
             float obj    = ((float)qbuf[off + 4] - (float)ozp) * oscale;
             float pscore = ((float)qbuf[off + 5] - (float)ozp) * oscale; /* class 0 = person */
@@ -621,7 +621,8 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
         n = post_process_yolov5(ctx, out, (void *)lb,
                                  inf->conf_thresh, inf->nms_thresh,
                                  cls, cf, bx, by, bw, bh, MAX_DETECTIONS);
-        for (int i = 0; i < n && i < max_dets; i++) {
+        if (n > max_dets) n = max_dets;
+        for (int i = 0; i < n; i++) {
             dets[i].class_id = cls[i];
             dets[i].confidence = cf[i];
             dets[i].x = (int)bx[i]; dets[i].y = (int)by[i];

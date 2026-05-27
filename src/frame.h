@@ -113,6 +113,9 @@ static inline bool ring_get(ring_t *r, frame_t *f)
     pthread_mutex_lock(&r->lock);
     if (r->has_new) {
         *f = r->buf;
+        r->buf.fd = -1;
+        r->buf.ptr = NULL;
+        r->buf.own_ptr = false;
         r->has_new = false;
         ok = true;
     }
