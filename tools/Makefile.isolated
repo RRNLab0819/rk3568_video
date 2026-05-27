@@ -1,0 +1,42 @@
+# Build isolated YOLOv5 test - uses official code paths exactly
+# Source the SDK first: source /home/rrn/3568/3568_sdk/environment-setup
+# Then: make -f Makefile.isolated
+
+SDK_PATH    ?= /home/rrn/3568/3568_sdk
+SYSROOT     ?= $(SDK_PATH)/aarch64-buildroot-linux-gnu/sysroot
+CXX         ?= aarch64-buildroot-linux-gnu-g++
+STRIP       ?= aarch64-buildroot-linux-gnu-strip
+
+OFFICIAL    := /home/rrn/rknn_model_zoo-1.6.0
+
+CXXFLAGS    := -Wall -O2 -g
+CXXFLAGS    += --sysroot=$(SYSROOT)
+CXXFLAGS    += -I$(SYSROOT)/usr/include
+CXXFLAGS    += -I$(SYSROOT)/usr/include/rknn
+CXXFLAGS    += -I$(OFFICIAL)/3rdparty/stb_image
+CXXFLAGS    += -std=c++11
+CXXFLAGS    += -Wno-sign-compare -Wno-unused-variable
+
+LDFLAGS     := --sysroot=$(SYSROOT)
+LDFLAGS     += -L$(SYSROOT)/usr/lib
+LIBS        := -lrknnrt -lpthread -lrt -ldl -lm -lstdc++
+
+TARGET      := isolated_yolov5_test
+SRC         := isolated_yolov5_test.cc
+
+.PHONY: all clean push
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< -o $@ $(LIBS)
+	$(STRIP) --strip-unneeded $@ 2>/dev/null || true
+	@echo "=== Build OK: $(TARGET) ==="
+
+clean:
+	rm -f $(TARGET)
+
+push: $(TARGET)
+	adb push $(TARGET) /userdata/$(TARGET)
+	adb shell chmod +x /userdata/$(TARGET)
+	@echo "=== Deployed to /userdata/$(TARGET) ==="

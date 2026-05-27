@@ -1,0 +1,13 @@
+# Build artifacts
+build/
+*.o
+
+# Compiled binary
+rk3568_camera
+
+# Local Claude config
+.claude/
+
+# Compiled test binaries
+tools/isolated_yolov5_test
+tools/isolated_yolov5_test_320
