@@ -275,6 +275,7 @@ typedef enum {
     BACKEND_OPENCV_BGR,    /* OpenCV cvtColor NV12→BGR→resize→letterbox */
     BACKEND_OPENCV_RGB,    /* OpenCV cvtColor NV12→RGB→resize→letterbox */
     BACKEND_NV21_TEST,     /* NV21→RGB (U/V swapped) to test camera output format */
+    BACKEND_FLIPV,         /* CURRENT_CPU + vertical flip — test camera orientation */
 } preprocess_backend_t;
 
 static preprocess_backend_t detect_backend(void)
@@ -290,6 +291,7 @@ static preprocess_backend_t detect_backend(void)
     else if (!strcmp(e, "current_cpu")) backend = BACKEND_CURRENT_CPU;
     else if (!strcmp(e, "current_rga")) backend = BACKEND_CURRENT_RGA;
     else if (!strcmp(e, "nv21_test"))  backend = BACKEND_NV21_TEST;
+    else if (!strcmp(e, "flipv"))      backend = BACKEND_FLIPV;
     fprintf(stderr, "[infer] preprocess backend: %s (%d)\n", e, (int)backend);
     return backend;
 }
@@ -404,6 +406,23 @@ static void nv21_letterbox_rgb(const uint8_t *nv21, int sw, int sh, int sstride,
     }
     rgb_letterbox(full_rgb, sw, sh, rgb, dw, dh, lb, 114);
     free(full_rgb);
+}
+
+/* ================================================================== */
+/* Vertical flip helper                                                 */
+/* ================================================================== */
+static void flip_rgb_vertical(uint8_t *rgb, int w, int h)
+{
+    uint8_t *tmp = (uint8_t *)malloc(w * 3);
+    if (!tmp) return;
+    for (int y = 0; y < h / 2; y++) {
+        uint8_t *row_a = rgb + y * w * 3;
+        uint8_t *row_b = rgb + (h - 1 - y) * w * 3;
+        memcpy(tmp, row_a, w * 3);
+        memcpy(row_a, row_b, w * 3);
+        memcpy(row_b, tmp, w * 3);
+    }
+    free(tmp);
 }
 
 /* ================================================================== */
@@ -690,6 +709,27 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
 
     /* ---- OpenCV backend (bypass RGA/CPU, use cv::cvtColor) ---- */
     preprocess_backend_t backend = detect_backend();
+    if (backend == BACKEND_FLIPV) {
+        /* Same as CURRENT_CPU but vertically flip the RGB result */
+        nv12_letterbox_rgb((const uint8_t *)f->ptr, fw, fh, fs,
+                            inf->rgb_buf, mw, mh, &lb);
+        flip_rgb_vertical(inf->rgb_buf, mw, mh);
+        gettimeofday(&_t2, NULL);
+        {
+            static int flv_dump = 0;
+            if (flv_dump < 3) {
+                char path[64];
+                snprintf(path, sizeof(path), "/tmp/input_flipv_%d.ppm", flv_dump);
+                dump_ppm(path, inf->rgb_buf, mw, mh);
+                dump_color_stats("flipv", inf->rgb_buf, mw, mh);
+                fprintf(stderr, "[diag] flipv dump %d/3: %s scale=%.4f pad=(%d,%d)\n",
+                        flv_dump + 1, path, lb.scale, lb.x_pad, lb.y_pad);
+                flv_dump++;
+            }
+        }
+        return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
+    }
+
     if (backend == BACKEND_NV21_TEST) {
         nv21_letterbox_rgb((const uint8_t *)f->ptr, fw, fh, fs,
                             inf->rgb_buf, mw, mh, &lb);
