@@ -292,7 +292,7 @@ int main(int argc, char **argv)
     gettimeofday(&last_snap, NULL);
     int snap_interval = 2;  /* auto-save every 2 seconds */
     int total_snaps = 0;
-    int max_snaps = 25;
+    int max_snaps = 0;
     printf("[main] auto-save every %ds, max %d frames per camera\n",
            snap_interval, max_snaps);
     while (1) {

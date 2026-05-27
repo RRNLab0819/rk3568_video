@@ -66,6 +66,7 @@ struct display_s {
     GLuint                  texY[4];
     GLuint                  texUV[4];
     bool                    has_frame[4];
+    bool                    tex_ready[4];
     bool                    configured;
 
     /* Display mode (AVM_MODE > FISHEYE_MODE > grid baseline) */
@@ -226,24 +227,32 @@ static void import_nv12(display_t *d, int cam, const frame_t *f)
         uv = tmp_uv;
     }
 
-    /* Upload to GL textures */
     glBindTexture(GL_TEXTURE_2D, d->texY[cam]);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                 f->width, f->height, 0,
-                 GL_LUMINANCE, GL_UNSIGNED_BYTE, y);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (!d->tex_ready[cam]) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+                     f->width, f->height, 0,
+                     GL_LUMINANCE, GL_UNSIGNED_BYTE, y);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    glBindTexture(GL_TEXTURE_2D, d->texUV[cam]);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA,
-                 f->width / 2, f->height / 2, 0,
-                 GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, uv);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, d->texUV[cam]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA,
+                     f->width / 2, f->height / 2, 0,
+                     GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, uv);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        d->tex_ready[cam] = true;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, f->width, f->height,
+                        GL_LUMINANCE, GL_UNSIGNED_BYTE, y);
+        glBindTexture(GL_TEXTURE_2D, d->texUV[cam]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, f->width / 2, f->height / 2,
+                        GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, uv);
+    }
 
     free(tmp_y);
     free(tmp_uv);
