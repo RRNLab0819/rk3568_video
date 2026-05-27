@@ -454,35 +454,25 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
             for (int k = 0; k < 50 && k < n_dets; k++) {
                 int off = k * n_props;
                 float obj = ((float)qbuf[off + 4] - (float)ozp) * oscale;
-                float best_s = ((float)qbuf[off + 5] - (float)ozp) * oscale;
-                for (int c = 1; c < OBJ_CLASS_NUM; c++) {
-                    float s = ((float)qbuf[off + 5 + c] - (float)ozp) * oscale;
-                    if (s > best_s) best_s = s;
-                }
-                fprintf(stderr, "%.3f ", obj * best_s);
+                float person_s = ((float)qbuf[off + 5] - (float)ozp) * oscale;
+                fprintf(stderr, "%.3f ", obj * person_s);
             }
             fprintf(stderr, "\n");
         }
 
-        /* Direct decode */
-
+        /* Direct decode — person-only (class 0). Skip scanning 79 other classes. */
         int candidates = 0;
         for (int i = 0; i < n_dets && candidates < MAX_DETECTIONS * 4; i++) {
             int off = i * n_props;
-            float obj = ((float)qbuf[off + 4] - (float)ozp) * oscale;
-            int best_c = 0;
-            float best_s = ((float)qbuf[off + 5] - (float)ozp) * oscale;
-            for (int c = 1; c < OBJ_CLASS_NUM; c++) {
-                float s = ((float)qbuf[off + 5 + c] - (float)ozp) * oscale;
-                if (s > best_s) { best_s = s; best_c = c; }
-            }
-            float score = obj * best_s;
+            float obj    = ((float)qbuf[off + 4] - (float)ozp) * oscale;
+            float pscore = ((float)qbuf[off + 5] - (float)ozp) * oscale; /* class 0 = person */
+            float score  = obj * pscore;
             if (score >= threshold) {
                 float cx = ((float)qbuf[off + 0] - (float)ozp) * oscale;
                 float cy = ((float)qbuf[off + 1] - (float)ozp) * oscale;
                 float bw_ = ((float)qbuf[off + 2] - (float)ozp) * oscale;
                 float bh_ = ((float)qbuf[off + 3] - (float)ozp) * oscale;
-                cls[candidates] = best_c;
+                cls[candidates] = 0; /* always person */
                 cf[candidates] = score;
                 bx[candidates] = cx - bw_ * 0.5f;
                 by[candidates] = cy - bh_ * 0.5f;
@@ -492,11 +482,11 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
             }
         }
 
-        /* Simple NMS per class */
-        for (int c = 0; c < OBJ_CLASS_NUM && n < MAX_DETECTIONS; c++) {
+        /* Simple NMS — class 0 (person) only */
+        {
+            int c = 0;
             for (int i = 0; i < candidates; i++) {
                 if (cls[i] != c || cf[i] < threshold) continue;
-                /* Suppress lower-score boxes of same class with IoU > NMS */
                 for (int j = i + 1; j < candidates; j++) {
                     if (cls[j] != c || cf[j] < threshold) continue;
                     float ix = fmaxf(bx[i], bx[j]);
@@ -507,11 +497,10 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
                         float inter = iw * ih;
                         float uni = bw[i]*bh[i] + bw[j]*bh[j] - inter;
                         if (uni > 0 && inter / uni > inf->nms_thresh)
-                            cf[j] = 0;  /* suppress */
+                            cf[j] = 0;
                     }
                 }
                 if (cf[i] >= threshold && n < max_dets) {
-                    /* Map from model space to original image space using letterbox */
                     float ox1 = (bx[i] - lb->x_pad) / lb->scale;
                     float oy1 = (by[i] - lb->y_pad) / lb->scale;
                     float ow  = bw[i] / lb->scale;
@@ -521,7 +510,7 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
                     if (ox1 + ow > 1920.0f) ow = 1920.0f - ox1;
                     if (oy1 + oh > 1080.0f) oh = 1080.0f - oy1;
                     if (ow > 0 && oh > 0) {
-                        dets[n].class_id = cls[i];
+                        dets[n].class_id = 0;
                         dets[n].confidence = cf[i];
                         dets[n].x = (int)ox1; dets[n].y = (int)oy1;
                         dets[n].w = (int)ow;  dets[n].h = (int)oh;
