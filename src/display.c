@@ -840,7 +840,7 @@ void disp_draw(display_t *d)
 
         pthread_mutex_lock(&d->det_lock);
         glUseProgram(d->osd_prog);
-        glLineWidth(3.0f);
+        glLineWidth(2.0f);
 
         static const float ch_colors[4][4] = {
             {1,0,0,1}, {0,1,0,1}, {0,0,1,1}, {1,1,0,1},

@@ -19,7 +19,8 @@ typedef struct {
     uint32_t format;    /* V4L2 pixel format */
     int64_t  pts;       /* timestamp (us) */
     uint8_t  cam_idx;   /* 0..3 */
-    uint32_t seq;       /* frame counter */
+    uint32_t seq;       /* per-camera frame counter */
+    uint32_t cap_seq;   /* global capture sequence (monotonic across all cams) */
 } frame_t;
 
 /* ---- SPSC ring buffer, depth=1 (always latest frame) ---- */

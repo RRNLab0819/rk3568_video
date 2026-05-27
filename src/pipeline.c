@@ -60,10 +60,12 @@ static void *capture_thread(void *arg)
     channel_t *ch = arg;
     frame_t f = {0};
     f.cam_idx = ch->id;
+    static volatile uint32_t g_cap_seq = 0;
 
     while (ch->running) {
         if (cap_dequeue(ch->cap, &f) < 0) continue;
         ch->frame_count++;
+        f.cap_seq = __sync_fetch_and_add(&g_cap_seq, 1);
         __sync_fetch_and_add(&ch->pipe->stats.cap_frames[ch->id], 1);
 
         ring_put(ch->disp_ring, &f);          /* shallow copy to display */
@@ -231,27 +233,22 @@ static void *infer_thread(void *arg)
         p->stats.inf_total++;
         p->stats.inf_per_ch[cam]++;
         p->stats.inf_latency_ms = lat_ms;
+
+        /* Stdout summary for quick visual check */
+        if (n_drawn > 0) {
+            printf("[DETECT] cam%d person=%d best=%.2f box=(%d,%d,%dx%d) age=%.0fms\n",
+                   cam, n_drawn, best_score,
+                   smooth_dets[0].x, smooth_dets[0].y,
+                   smooth_dets[0].w, smooth_dets[0].h, age_ms);
+        }
         p->stats.box_age_ms = age_ms;
         if (age_ms > p->stats.box_age_max) p->stats.box_age_max = age_ms;
         p->stats.inf_frame_seq = f.seq;
 
-        /* Person-only logging with age */
-        if (n_cand == 0) {
-            fprintf(stderr, "[infer] cam%d seq=%u person=0 age=%.0fms "
-                    "reason=no_person raw=%d lat=%.1fms\n",
-                    cam, f.seq, age_ms, n_raw, lat_ms);
-        } else if (n_drawn == 0) {
-            fprintf(stderr, "[infer] cam%d seq=%u person=%d age=%.0fms "
-                    "reason=below_thresh best=%.2f thresh=%.2f lat=%.1fms\n",
-                    cam, f.seq, n_cand, age_ms, best_score, p_thresh, lat_ms);
-        } else {
-            fprintf(stderr, "[infer] cam%d seq=%u person=%d age=%.0fms "
-                    "best=%.2f box=[%d,%d,%dx%d] lat=%.1fms\n",
-                    cam, f.seq, n_cand, age_ms,
-                    smooth_dets[0].confidence,
-                    smooth_dets[0].x, smooth_dets[0].y,
-                    smooth_dets[0].w, smooth_dets[0].h, lat_ms);
-        }
+        /* Person-only logging with age + freshness */
+        fprintf(stderr, "[infer] cam%d cap_seq=%u seq=%u person=%d/%d best=%.3f age=%.0fms "
+                "lat=%.1fms raw=%d\n",
+                cam, f.cap_seq, f.seq, n_drawn, n_cand, best_score, age_ms, lat_ms, n_raw);
 
         current_ch = (current_ch + 1) % n_ch;
         if (f.fd >= 0) close(f.fd);

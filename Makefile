@@ -15,6 +15,7 @@ CFLAGS  += -I$(SYSROOT)/usr/include/rga
 CFLAGS  += -I$(SYSROOT)/usr/include/rknn
 CFLAGS  += -I$(SYSROOT)/usr/include/libdrm
 CFLAGS  += -I$(SYSROOT)/usr/include/EGL
+CFLAGS  += -I$(SYSROOT)/usr/include/opencv4
 CXXFLAGS := $(CFLAGS) -std=c++11 -Wno-sign-compare
 CFLAGS  += -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
 
@@ -23,6 +24,7 @@ LDFLAGS += -L$(SYSROOT)/usr/lib
 LIBS    := -lrockchip_mpp -lrknnrt -lrga -ldrm -lpthread -lrt -ldl -lm
 LIBS    += -lwayland-client -lwayland-egl -lEGL -lGLESv2 -lmali -lmali-hook
 LIBS    += -lturbojpeg
+LIBS    += -lopencv_core -lopencv_imgproc -lopencv_imgcodecs
 LIBS    += -lstdc++
 
 SRCDIR   := src

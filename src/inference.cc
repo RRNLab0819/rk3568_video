@@ -6,6 +6,7 @@
  *   3. NCHW/NHWC detection from rknn_query (not hardcoded NHWC)
  *   4. Bilinear RGB letterbox (not nearest-neighbour)
  *   5. Diagnostic dumps: rknn attrs, input PPM, candidate boxes
+ *   6. OpenCV reference backend for NV12→RGB comparison
  */
 #include "inference.h"
 #include "yolov5.h"
@@ -18,10 +19,14 @@
 #include <sys/time.h>
 #include <im2d.h>
 #include <rga.h>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 struct inference_s {
     rknn_app_context_t   app_ctx;
     uint8_t             *rgb_buf;       /* model input size RGB buffer (320x320x3) */
+    uint8_t             *diag_rgb_buf;  /* second RGB buffer for dual-path comparison */
     uint8_t             *nv12_buf;      /* model input size NV12 buffer (320x320x3/2, RGA dst) */
     int                  rgb_size;
     int                  nv12_size;
@@ -262,6 +267,108 @@ static void nv12_letterbox_rgb(const uint8_t *nv12, int sw, int sh, int sstride,
 }
 
 /* ================================================================== */
+/* Preprocess backend selection (env PREPROCESS_BACKEND)                */
+/* ================================================================== */
+typedef enum {
+    BACKEND_CURRENT_CPU,   /* current CPU NV12→RGB full-res→letterbox */
+    BACKEND_CURRENT_RGA,   /* current RGA dma_buf resize→NV12→RGB */
+    BACKEND_OPENCV_BGR,    /* OpenCV cvtColor NV12→BGR→resize→letterbox */
+    BACKEND_OPENCV_RGB,    /* OpenCV cvtColor NV12→RGB→resize→letterbox */
+} preprocess_backend_t;
+
+static preprocess_backend_t detect_backend(void)
+{
+    static int checked = 0;
+    static preprocess_backend_t backend = BACKEND_CURRENT_CPU;
+    if (checked) return backend;
+    checked = 1;
+    const char *e = getenv("PREPROCESS_BACKEND");
+    if (!e) return backend;
+    if (!strcmp(e, "opencv_bgr"))      backend = BACKEND_OPENCV_BGR;
+    else if (!strcmp(e, "opencv_rgb")) backend = BACKEND_OPENCV_RGB;
+    else if (!strcmp(e, "current_cpu")) backend = BACKEND_CURRENT_CPU;
+    else if (!strcmp(e, "current_rga")) backend = BACKEND_CURRENT_RGA;
+    fprintf(stderr, "[infer] preprocess backend: %s (%d)\n", e, (int)backend);
+    return backend;
+}
+
+/* ================================================================== */
+/* Color stats diagnostic                                              */
+/* ================================================================== */
+static void dump_color_stats(const char *tag, const uint8_t *rgb, int w, int h)
+{
+    long long sum[3] = {0, 0, 0};
+    int minv[3] = {255, 255, 255};
+    int maxv[3] = {0, 0, 0};
+    int n = w * h;
+    for (int i = 0; i < n; i++) {
+        for (int c = 0; c < 3; c++) {
+            int v = rgb[i * 3 + c];
+            sum[c] += v;
+            if (v < minv[c]) minv[c] = v;
+            if (v > maxv[c]) maxv[c] = v;
+        }
+    }
+    /* Center 64x64 region */
+    long long csum[3] = {0, 0, 0};
+    int cmin[3] = {255, 255, 255}, cmax[3] = {0, 0, 0};
+    int cx0 = w / 2 - 32, cy0 = h / 2 - 32;
+    for (int y = cy0; y < cy0 + 64; y++) {
+        for (int x = cx0; x < cx0 + 64; x++) {
+            int i = y * w + x;
+            for (int c = 0; c < 3; c++) {
+                int v = rgb[i * 3 + c];
+                csum[c] += v;
+                if (v < cmin[c]) cmin[c] = v;
+                if (v > cmax[c]) cmax[c] = v;
+            }
+        }
+    }
+    fprintf(stderr, "[color:%s] full %dx%d mean=(%.1f,%.1f,%.1f) min=(%d,%d,%d) max=(%d,%d,%d) "
+            "| center64 mean=(%.1f,%.1f,%.1f) min=(%d,%d,%d) max=(%d,%d,%d)\n",
+            tag, w, h,
+            sum[0]/(float)n, sum[1]/(float)n, sum[2]/(float)n,
+            minv[0], minv[1], minv[2], maxv[0], maxv[1], maxv[2],
+            csum[0]/4096.f, csum[1]/4096.f, csum[2]/4096.f,
+            cmin[0], cmin[1], cmin[2], cmax[0], cmax[1], cmax[2]);
+}
+
+/* ================================================================== */
+/* OpenCV NV12→RGB/BGR letterbox (reference for comparison)             */
+/* ================================================================== */
+static void opencv_nv12_letterbox(const uint8_t *nv12, int sw, int sh,
+                                   uint8_t *rgb, int dw, int dh,
+                                   letterbox_t *lb, bool to_rgb)
+{
+    cv::Mat nv12_mat(sh + sh / 2, sw, CV_8UC1, (void *)nv12);
+    cv::Mat color;
+    int code = to_rgb ? cv::COLOR_YUV2RGB_NV12 : cv::COLOR_YUV2BGR_NV12;
+    cv::cvtColor(nv12_mat, color, code);
+
+    float swf = (float)dw / sw, shf = (float)dh / sh;
+    float scale = (swf < shf) ? swf : shf;
+    int rw = (int)(sw * scale), rh = (int)(sh * scale);
+    if (rw % 4 != 0) rw -= rw % 4;
+    if (rh % 2 != 0) rh -= rh % 2;
+    int x_pad = (dw - rw) / 2, y_pad = (dh - rh) / 2;
+    if (x_pad % 2 != 0) { x_pad--; if (x_pad < 0) x_pad = 0; }
+    if (y_pad % 2 != 0) { y_pad--; if (y_pad < 0) y_pad = 0; }
+
+    lb->scale = scale;
+    lb->x_pad = x_pad;
+    lb->y_pad = y_pad;
+
+    cv::Mat resized;
+    cv::resize(color, resized, cv::Size(rw, rh), 0, 0, cv::INTER_LINEAR);
+
+    memset(rgb, 114, dw * dh * 3);
+    for (int y = 0; y < rh; y++) {
+        const uint8_t *src_row = resized.ptr<const uint8_t>(y);
+        memcpy(rgb + ((y_pad + y) * dw + x_pad) * 3, src_row, rw * 3);
+    }
+}
+
+/* ================================================================== */
 /* Dump RGB buffer as PPM for visual inspection                        */
 /* ================================================================== */
 static void dump_ppm(const char *path, const uint8_t *rgb, int w, int h)
@@ -330,7 +437,7 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
         int n_props = ctx->output_attrs[0].dims[2]; /* 85 */
         int32_t ozp = ctx->output_attrs[0].zp;
         float oscale = ctx->output_attrs[0].scale;
-        float threshold = inf->conf_thresh * 2.5f;  /* compensate for quantization scale */
+        float threshold = inf->conf_thresh;
 
         static int diag_once = 0;
         if (!diag_once) {
@@ -341,9 +448,24 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
             for (int k = 0; k < 20 && k < n_dets * n_props; k++)
                 fprintf(stderr, "%d ", qbuf[k]);
             fprintf(stderr, "\n");
+            fprintf(stderr, "[diag] using decoded threshold=%.4f (conf_thresh=%.4f)\n",
+                    threshold, inf->conf_thresh);
+            fprintf(stderr, "[diag] first 50 dequantized scores: ");
+            for (int k = 0; k < 50 && k < n_dets; k++) {
+                int off = k * n_props;
+                float obj = ((float)qbuf[off + 4] - (float)ozp) * oscale;
+                float best_s = ((float)qbuf[off + 5] - (float)ozp) * oscale;
+                for (int c = 1; c < OBJ_CLASS_NUM; c++) {
+                    float s = ((float)qbuf[off + 5 + c] - (float)ozp) * oscale;
+                    if (s > best_s) best_s = s;
+                }
+                fprintf(stderr, "%.3f ", obj * best_s);
+            }
+            fprintf(stderr, "\n");
         }
 
         /* Direct decode */
+
         int candidates = 0;
         for (int i = 0; i < n_dets && candidates < MAX_DETECTIONS * 4; i++) {
             int off = i * n_props;
@@ -464,6 +586,10 @@ extern "C" infer_t *infer_open(const char *model_path, float conf, float nms, bo
     inf->rgb_buf = (uint8_t *)malloc(inf->rgb_size);
     if (!inf->rgb_buf) { free(inf); return NULL; }
 
+    /* Second RGB buffer for dual-path comparison */
+    inf->diag_rgb_buf = (uint8_t *)malloc(inf->rgb_size);
+    if (!inf->diag_rgb_buf) { free(inf->rgb_buf); free(inf); return NULL; }
+
     /* Pre-allocate NV12 buffer at model input size for RGA resize dst */
     inf->mw = inf->app_ctx.model_width;
     inf->mh = inf->app_ctx.model_height;
@@ -536,6 +662,30 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
 
     struct timeval _t0, _t2;
     gettimeofday(&_t0, NULL);
+
+    /* ---- OpenCV backend (bypass RGA/CPU, use cv::cvtColor) ---- */
+    preprocess_backend_t backend = detect_backend();
+    if (backend == BACKEND_OPENCV_BGR || backend == BACKEND_OPENCV_RGB) {
+        bool to_rgb = (backend == BACKEND_OPENCV_RGB);
+        opencv_nv12_letterbox((const uint8_t *)f->ptr, fw, fh,
+                               inf->rgb_buf, mw, mh, &lb, to_rgb);
+        gettimeofday(&_t2, NULL);
+
+        /* Diagnostic dumps */
+        {
+            static int ocv_dump = 0;
+            if (ocv_dump < 3) {
+                char path[64];
+                snprintf(path, sizeof(path), "/tmp/input_opencv_%d.ppm", ocv_dump);
+                dump_ppm(path, inf->rgb_buf, mw, mh);
+                dump_color_stats("opencv", inf->rgb_buf, mw, mh);
+                fprintf(stderr, "[diag] opencv dump %d/3: %s letterbox: scale=%.4f pad=(%d,%d)\n",
+                        ocv_dump + 1, path, lb.scale, lb.x_pad, lb.y_pad);
+                ocv_dump++;
+            }
+        }
+        return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
+    }
 
     /* Compute letterbox params */
     float sw = (float)mw / fw, sh = (float)mh / fh;
@@ -666,6 +816,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
             char path[64];
             snprintf(path, sizeof(path), "/tmp/infer_cam0_%d.ppm", dump_count);
             dump_ppm(path, inf->rgb_buf, mw, mh);
+            dump_color_stats("current", inf->rgb_buf, mw, mh);
             fprintf(stderr, "[diag] dump %d/3: %s %dx%d "
                     "letterbox: src=%dx%d scale=%.4f pad=(%d,%d)\n",
                     dump_count + 1, path, mw, mh, fw, fh,
@@ -686,7 +837,58 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
         }
     }
 
-    return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
+    int n_dets = run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
+
+    /* ---- Dual-path comparison (DIAG_DUAL=1, first 5 frames) ---- */
+    {
+        static int dual_done = 0;
+        static int dual_enabled = -1;
+        if (dual_enabled == -1) {
+            const char *e = getenv("DIAG_DUAL");
+            dual_enabled = (e && e[0] == '1') ? 1 : 0;
+        }
+        if (dual_enabled && dual_done < 5) {
+            /* Run OpenCV RGB path on same NV12 data */
+            letterbox_t lb2;
+            memset(&lb2, 0, sizeof(lb2));
+            opencv_nv12_letterbox((const uint8_t *)f->ptr, fw, fh,
+                                   inf->diag_rgb_buf, mw, mh, &lb2, true);
+            detection_t diag_dets[MAX_DETECTIONS];
+            int n2 = run_inference(inf, inf->diag_rgb_buf, &lb2, diag_dets, MAX_DETECTIONS);
+
+            /* Print comparison */
+            float cur_best = 0, ocv_best = 0;
+            int cur_pers = 0, ocv_pers = 0;
+            for (int i = 0; i < n_dets; i++) {
+                if (dets[i].class_id == 0) {
+                    cur_pers++;
+                    if (dets[i].confidence > cur_best) cur_best = dets[i].confidence;
+                }
+            }
+            for (int i = 0; i < n2; i++) {
+                if (diag_dets[i].class_id == 0) {
+                    ocv_pers++;
+                    if (diag_dets[i].confidence > ocv_best) ocv_best = diag_dets[i].confidence;
+                }
+            }
+            fprintf(stderr, "[dual] frame=%d current: persons=%d best=%.3f | opencv_rgb: persons=%d best=%.3f\n",
+                    dual_done, cur_pers, cur_best, ocv_pers, ocv_best);
+
+            /* Dump both PPMs for visual comparison */
+            {
+                char p1[64], p2[64];
+                snprintf(p1, sizeof(p1), "/tmp/dual_current_%d.ppm", dual_done);
+                snprintf(p2, sizeof(p2), "/tmp/dual_opencv_%d.ppm", dual_done);
+                dump_ppm(p1, inf->rgb_buf, mw, mh);
+                dump_ppm(p2, inf->diag_rgb_buf, mw, mh);
+                dump_color_stats("dual_current", inf->rgb_buf, mw, mh);
+                dump_color_stats("dual_opencv", inf->diag_rgb_buf, mw, mh);
+            }
+            dual_done++;
+        }
+    }
+
+    return n_dets;
 }
 
 extern "C" void infer_input_size(infer_t *inf, int *w, int *h)
@@ -699,6 +901,7 @@ extern "C" void infer_close(infer_t *inf)
 {
     if (!inf) return;
     free(inf->rgb_buf);
+    free(inf->diag_rgb_buf);
     free(inf->nv12_buf);
     if (inf->dst_nv12_handle)
         releasebuffer_handle(inf->dst_nv12_handle);
