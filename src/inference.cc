@@ -25,10 +25,11 @@
 
 struct inference_s {
     rknn_app_context_t   app_ctx;
-    uint8_t             *rgb_buf;       /* model input size RGB buffer (320x320x3) */
+    uint8_t             *rgb_buf;       /* model input size RGB buffer */
     uint8_t             *diag_rgb_buf;  /* second RGB buffer for dual-path comparison */
-    uint8_t             *nv12_buf;      /* model input size NV12 buffer (320x320x3/2, RGA dst) */
+    uint8_t             *nv12_buf;      /* model input size NV12 buffer (RGA dst) */
     int                  rgb_size;
+    bool                 flip_input;    /* vertically flip input (camera is mounted inverted) */
     int                  nv12_size;
     float                conf_thresh, nms_thresh;
     bool                 rga_enable;
@@ -619,6 +620,12 @@ extern "C" infer_t *infer_open(const char *model_path, float conf, float nms, bo
     inf->conf_thresh = conf;
     inf->nms_thresh  = nms;
     inf->rga_enable  = rga_enable;
+    /* Default flip ON — camera sensor is mounted inverted.
+     * Set FLIP_INPUT=0 env to disable. */
+    {
+        const char *f = getenv("FLIP_INPUT");
+        inf->flip_input = !(f && f[0] == '0');
+    }
 
     if (load_model(model_path, &inf->app_ctx) < 0) {
         free(inf);
@@ -709,27 +716,6 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
 
     /* ---- OpenCV backend (bypass RGA/CPU, use cv::cvtColor) ---- */
     preprocess_backend_t backend = detect_backend();
-    if (backend == BACKEND_FLIPV) {
-        /* Same as CURRENT_CPU but vertically flip the RGB result */
-        nv12_letterbox_rgb((const uint8_t *)f->ptr, fw, fh, fs,
-                            inf->rgb_buf, mw, mh, &lb);
-        flip_rgb_vertical(inf->rgb_buf, mw, mh);
-        gettimeofday(&_t2, NULL);
-        {
-            static int flv_dump = 0;
-            if (flv_dump < 3) {
-                char path[64];
-                snprintf(path, sizeof(path), "/tmp/input_flipv_%d.ppm", flv_dump);
-                dump_ppm(path, inf->rgb_buf, mw, mh);
-                dump_color_stats("flipv", inf->rgb_buf, mw, mh);
-                fprintf(stderr, "[diag] flipv dump %d/3: %s scale=%.4f pad=(%d,%d)\n",
-                        flv_dump + 1, path, lb.scale, lb.x_pad, lb.y_pad);
-                flv_dump++;
-            }
-        }
-        return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
-    }
-
     if (backend == BACKEND_NV21_TEST) {
         nv21_letterbox_rgb((const uint8_t *)f->ptr, fw, fh, fs,
                             inf->rgb_buf, mw, mh, &lb);
@@ -746,6 +732,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
                 nv21_dump++;
             }
         }
+        if (inf->flip_input) flip_rgb_vertical(inf->rgb_buf, mw, mh);
         return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
     }
 
@@ -768,6 +755,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
                 ocv_dump++;
             }
         }
+        if (inf->flip_input) flip_rgb_vertical(inf->rgb_buf, mw, mh);
         return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
     }
 
@@ -893,21 +881,9 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
         gettimeofday(&_t2, NULL);
     }
 
-    /* Diagnostic dump (first 3 frames) */
-    {
-        static int dump_count = 0;
-        if (dump_count < 3) {
-            char path[64];
-            snprintf(path, sizeof(path), "/tmp/infer_cam0_%d.ppm", dump_count);
-            dump_ppm(path, inf->rgb_buf, mw, mh);
-            dump_color_stats("current", inf->rgb_buf, mw, mh);
-            fprintf(stderr, "[diag] dump %d/3: %s %dx%d "
-                    "letterbox: src=%dx%d scale=%.4f pad=(%d,%d)\n",
-                    dump_count + 1, path, mw, mh, fw, fh,
-                    lb.scale, lb.x_pad, lb.y_pad);
-            dump_count++;
-        }
-    }
+    /* Apply default vertical flip — camera sensor is mounted inverted */
+    if (inf->flip_input)
+        flip_rgb_vertical(inf->rgb_buf, mw, mh);
 
     /* Preprocess timing (every 32nd frame) */
     {
@@ -918,6 +894,22 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
             fprintf(stderr, "[prep] %s rga=%.1f cpu=%.1f total=%.1f ms\n",
                     inf->rga_enable ? "rga+dma_buf" : "cpu_only",
                     inf->rga_ms, inf->cpu_nv12_rgb_ms, prep_ms);
+        }
+    }
+
+    /* Diagnostic dump AFTER flip (first 3 frames) — shows actual model input */
+    {
+        static int dump_count = 0;
+        if (dump_count < 3) {
+            char path[64];
+            snprintf(path, sizeof(path), "/tmp/infer_cam0_%d.ppm", dump_count);
+            dump_ppm(path, inf->rgb_buf, mw, mh);
+            dump_color_stats("current", inf->rgb_buf, mw, mh);
+            fprintf(stderr, "[diag] dump %d/3: %s %dx%d "
+                    "letterbox: src=%dx%d scale=%.4f pad=(%d,%d) flip=%d\n",
+                    dump_count + 1, path, mw, mh, fw, fh,
+                    lb.scale, lb.x_pad, lb.y_pad, inf->flip_input);
+            dump_count++;
         }
     }
 
