@@ -232,25 +232,70 @@ static void rgb_letterbox(const uint8_t *src, int sw, int sh,
 static void nv12_letterbox_rgb(const uint8_t *nv12, int sw, int sh, int sstride,
                                uint8_t *rgb, int dw, int dh, letterbox_t *lb)
 {
-    /* First convert full NV12 to full RGB (no resize), then letterbox.
-     * This avoids the nearest-neighbour bug; it does bilinear in the
-     * RGB letterbox step. */
+    float scale_w = (float)dw / sw;
+    float scale_h = (float)dh / sh;
+    float scale = (scale_w < scale_h) ? scale_w : scale_h;
+    int rw = (int)(sw * scale);
+    int rh = (int)(sh * scale);
 
-    /* Allocate temp full-res RGB */
-    uint8_t *full_rgb = (uint8_t *)malloc(sw * sh * 3);
-    if (!full_rgb) return;
+    if (rw % 4 != 0) rw -= rw % 4;
+    if (rh % 2 != 0) rh -= rh % 2;
+    if (rw <= 0 || rh <= 0) return;
+
+    int x_pad = (dw - rw) / 2;
+    int y_pad = (dh - rh) / 2;
+    if (x_pad % 2 != 0) { x_pad -= x_pad % 2; if (x_pad < 0) x_pad = 0; }
+    if (y_pad % 2 != 0) { y_pad -= y_pad % 2; if (y_pad < 0) y_pad = 0; }
+
+    lb->scale = scale;
+    lb->x_pad = x_pad;
+    lb->y_pad = y_pad;
+
+    memset(rgb, 114, dw * dh * 3);
 
     const uint8_t *yplane  = nv12;
     const uint8_t *uvplane = nv12 + sstride * sh;
+    float inv_scale = 1.0f / scale;
 
-    for (int r = 0; r < sh; r++) {
-        const uint8_t *yrow  = yplane  + r * sstride;
-        const uint8_t *uvrow = uvplane + (r / 2) * sstride;
-        uint8_t *drow = full_rgb + r * sw * 3;
-        for (int c = 0; c < sw; c++) {
-            int Y = yrow[c];
-            int U = uvrow[(c / 2) * 2];
-            int V = uvrow[(c / 2) * 2 + 1];
+    for (int dy = 0; dy < rh; dy++) {
+        float syf = (dy + 0.5f) * inv_scale - 0.5f;
+        if (syf < 0.0f) syf = 0.0f;
+        int sy0 = (int)syf;
+        if (sy0 >= sh - 1) sy0 = sh - 2;
+        int sy1 = sy0 + 1;
+        float wy = syf - sy0;
+        if (wy < 0.0f) wy = 0.0f;
+        if (wy > 1.0f) wy = 1.0f;
+
+        const uint8_t *yrow0 = yplane + sy0 * sstride;
+        const uint8_t *yrow1 = yplane + sy1 * sstride;
+        uint8_t *drow = rgb + ((y_pad + dy) * dw + x_pad) * 3;
+
+        for (int dx = 0; dx < rw; dx++) {
+            float sxf = (dx + 0.5f) * inv_scale - 0.5f;
+            if (sxf < 0.0f) sxf = 0.0f;
+            int sx0 = (int)sxf;
+            if (sx0 >= sw - 1) sx0 = sw - 2;
+            int sx1 = sx0 + 1;
+            float wx = sxf - sx0;
+            if (wx < 0.0f) wx = 0.0f;
+            if (wx > 1.0f) wx = 1.0f;
+
+            float y00 = yrow0[sx0], y01 = yrow0[sx1];
+            float y10 = yrow1[sx0], y11 = yrow1[sx1];
+            int Y = (int)(y00 * (1.0f - wx) * (1.0f - wy) +
+                          y01 * wx * (1.0f - wy) +
+                          y10 * (1.0f - wx) * wy +
+                          y11 * wx * wy + 0.5f);
+
+            int uvx = sx0 & ~1;
+            if (uvx >= sw - 1) uvx = sw - 2;
+            int uvy = sy0 / 2;
+            if (uvy >= sh / 2) uvy = sh / 2 - 1;
+            const uint8_t *uvrow = uvplane + uvy * sstride;
+            int U = uvrow[uvx];
+            int V = uvrow[uvx + 1];
+
             int C = Y - 16, D = U - 128, E = V - 128;
             int rv = (298 * C + 409 * E + 128) >> 8;
             int gv = (298 * C - 100 * D - 208 * E + 128) >> 8;
@@ -261,10 +306,6 @@ static void nv12_letterbox_rgb(const uint8_t *nv12, int sw, int sh, int sstride,
             drow += 3;
         }
     }
-
-    /* Now do bilinear RGB letterbox */
-    rgb_letterbox(full_rgb, sw, sh, rgb, dw, dh, lb, 114);
-    free(full_rgb);
 }
 
 /* ================================================================== */

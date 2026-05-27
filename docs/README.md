@@ -23,7 +23,7 @@ cd /userdata && LD_LIBRARY_PATH=/usr/lib ./rk3568_camera
 ./rk3568_camera -c 1 --no-enc
 
 # AI inference (camera 0 only)
-./rk3568_camera -m /userdata/yolov5n_320.rknn -c 1 --no-enc --rga
+./rk3568_camera -m /userdata/yolov5.rknn -c 1 --no-enc --rga
 
 # Fisheye correction (all 4 cameras)
 FISHEYE_MODE=1 ./rk3568_camera -c 4 --no-enc

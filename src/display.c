@@ -193,23 +193,37 @@ static void import_nv12(display_t *d, int cam, const frame_t *f)
 
     int ysz  = f->width * f->height;
     int uvsz = ysz / 2;
+    const uint8_t *y = (const uint8_t *)f->ptr;
+    const uint8_t *uv = y + ysz;
+    uint8_t *tmp_y = NULL;
+    uint8_t *tmp_uv = NULL;
 
-    /* Copy Y plane — strip stride padding */
-    uint8_t *y  = malloc(ysz);
-    uint8_t *s  = f->ptr;
-    uint8_t *dptr = y;
-    for (int r = 0; r < f->height; r++) {
-        memcpy(dptr, s, f->width);
-        s += f->stride; dptr += f->width;
-    }
+    if (f->stride != f->width) {
+        tmp_y = (uint8_t *)malloc(ysz);
+        tmp_uv = (uint8_t *)malloc(uvsz);
+        if (!tmp_y || !tmp_uv) {
+            free(tmp_y);
+            free(tmp_uv);
+            return;
+        }
 
-    /* Copy UV plane — strip stride padding */
-    uint8_t *uv = malloc(uvsz);
-    s = (uint8_t*)f->ptr + f->stride * f->height;
-    dptr = uv;
-    for (int r = 0; r < f->height / 2; r++) {
-        memcpy(dptr, s, f->width);
-        s += f->stride; dptr += f->width;
+        uint8_t *dptr = tmp_y;
+        const uint8_t *s = (const uint8_t *)f->ptr;
+        for (int r = 0; r < f->height; r++) {
+            memcpy(dptr, s, f->width);
+            s += f->stride;
+            dptr += f->width;
+        }
+
+        dptr = tmp_uv;
+        s = (const uint8_t *)f->ptr + f->stride * f->height;
+        for (int r = 0; r < f->height / 2; r++) {
+            memcpy(dptr, s, f->width);
+            s += f->stride;
+            dptr += f->width;
+        }
+        y = tmp_y;
+        uv = tmp_uv;
     }
 
     /* Upload to GL textures */
@@ -231,7 +245,8 @@ static void import_nv12(display_t *d, int cam, const frame_t *f)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    free(y); free(uv);
+    free(tmp_y);
+    free(tmp_uv);
     d->has_frame[cam] = true;
 }
 

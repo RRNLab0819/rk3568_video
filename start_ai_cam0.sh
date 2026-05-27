@@ -1,10 +1,10 @@
 #!/bin/sh
 # RK3568 1-Channel + AI Person Detection
-# Requires: /userdata/yolov5n_320.rknn model file
+# Requires: /userdata/yolov5.rknn model file
 # Usage: /userdata/start_ai_cam0.sh
 
 BIN=/userdata/rk3568_camera
-MODEL=/userdata/yolov5n_320.rknn
+MODEL=/userdata/yolov5.rknn
 
 # ---- 1. Check model ----
 if [ ! -f "$MODEL" ]; then

@@ -37,7 +37,7 @@ Shows 4 cameras in 2x2 grid.
 ### AI person detection (cam0)
 
 ```bash
-./rk3568_camera -m /userdata/yolov5n_320.rknn -c 1 --no-enc --rga
+./rk3568_camera -m /userdata/yolov5.rknn -c 1 --no-enc --rga
 ```
 
 Red boxes overlay on display. Person-only by default.
@@ -45,7 +45,7 @@ Red boxes overlay on display. Person-only by default.
 ### 4-camera + AI
 
 ```bash
-./rk3568_camera -m /userdata/yolov5n_320.rknn -c 4 --rga
+./rk3568_camera -m /userdata/yolov5.rknn -c 4 --rga
 ```
 
 Round-robin inference across all cameras.
@@ -115,7 +115,7 @@ bitrate = 4000000
 
 [inference]
 enabled = false
-model   = /userdata/yolov5n_320.rknn
+model   = /userdata/yolov5.rknn
 interval = 1
 conf    = 0.20
 nms     = 0.45

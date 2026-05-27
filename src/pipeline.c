@@ -68,37 +68,38 @@ static void *capture_thread(void *arg)
         f.cap_seq = __sync_fetch_and_add(&g_cap_seq, 1);
         __sync_fetch_and_add(&ch->pipe->stats.cap_frames[ch->id], 1);
 
-        ring_put(ch->disp_ring, &f);          /* shallow copy to display */
-        if (ch->enc_ring)
-            ring_put(ch->enc_ring, &f);        /* shallow copy to encoder */
+        frame_t disp_f;
+        if (frame_clone_packed_nv12(&disp_f, &f, false)) {
+            ring_put(ch->disp_ring, &disp_f);
+        } else {
+            __sync_fetch_and_add(&ch->pipe->stats.dropped_frames, 1);
+        }
+
+        if (ch->enc_ring) {
+            frame_t enc_f;
+            if (frame_clone_packed_nv12(&enc_f, &f, false)) {
+                ring_put(ch->enc_ring, &enc_f);
+            } else {
+                __sync_fetch_and_add(&ch->pipe->stats.dropped_frames, 1);
+            }
+        }
 
         if (ch->infer_ring && ch->pipe->inf_cfg &&
             (ch->frame_count % ch->pipe->inf_cfg->interval == 0)) {
-            /* Deep copy NV12 — V4L2 buffer may be overwritten after QBUF */
-            frame_t fcopy = f;
-            int ysz = f.width * f.height, uvsz = ysz / 2;
-            fcopy.ptr = malloc(ysz + uvsz);
-            if (fcopy.ptr) {
-                /* Copy Y plane row-by-row (may have stride padding) */
-                uint8_t *d = fcopy.ptr, *s = f.ptr;
-                for (int r = 0; r < f.height; r++)
-                    { memcpy(d, s, f.width); s += f.stride; d += f.width; }
-                /* Copy UV plane */
-                s = (uint8_t*)f.ptr + f.stride * f.height;
-                for (int r = 0; r < f.height/2; r++)
-                    { memcpy(d, s, f.width); s += f.stride; d += f.width; }
-                /* Timestamp for age tracking (overwrite V4L2 monotonic with realtime us) */
+            frame_t fcopy;
+            if (frame_clone_packed_nv12(&fcopy, &f, false)) {
+                /* Timestamp for age tracking: start from when the stable copy is ready. */
                 struct timeval tv;
                 gettimeofday(&tv, NULL);
                 fcopy.pts = (int64_t)tv.tv_sec * 1000000LL + tv.tv_usec;
                 fcopy.seq = ch->frame_count;
-                fcopy.own_ptr = true;  /* deep copy — consumer must free */
-                /* Preserve dma_buf fd for RGA preprocess — dup for infer ring */
-                fcopy.fd = (f.fd >= 0) ? dup(f.fd) : -1;
                 ring_put(ch->infer_ring, &fcopy);
+            } else {
+                __sync_fetch_and_add(&ch->pipe->stats.dropped_frames, 1);
             }
         }
-        if (f.fd >= 0) close(f.fd);            /* we dup'd it; rings have their own */
+
+        frame_release(&f);
         cap_queue(ch->cap);
 
         if (ch->pipe->max_frames > 0 &&
@@ -135,7 +136,7 @@ static void *encode_thread(void *arg)
             fwrite(out, 1, len, fp);
         }
         free(out);
-        if (f.fd >= 0) close(f.fd);
+        frame_release(&f);
         __sync_fetch_and_add(&ch->pipe->stats.enc_frames[ch->id], 1);
     }
 
@@ -251,8 +252,7 @@ static void *infer_thread(void *arg)
                 cam, f.cap_seq, f.seq, n_drawn, n_cand, best_score, age_ms, lat_ms, n_raw);
 
         current_ch = (current_ch + 1) % n_ch;
-        if (f.fd >= 0) close(f.fd);
-        free(f.ptr);
+        frame_release(&f);
     }
 
     /* Drain remaining frames from all infer rings */
@@ -260,8 +260,7 @@ static void *infer_thread(void *arg)
         int cam = ch_list[i];
         frame_t f;
         while (ring_get(&p->infer_rings[cam], &f)) {
-            if (f.fd >= 0) close(f.fd);
-            free(f.ptr);
+            frame_release(&f);
         }
     }
 
@@ -280,6 +279,11 @@ pipeline_t *pipe_new(int n, capture_cfg_t *cam, encoder_cfg_t *enc, int max_fram
     p->enc_cfg = enc;
     p->inf_cfg = NULL;
     pthread_mutex_init(&p->det_lock, NULL);
+    for (int i = 0; i < MAX_CAMS; i++) {
+        ring_init(&p->disp_rings[i]);
+        ring_init(&p->enc_rings[i]);
+        ring_init(&p->infer_rings[i]);
+    }
     for (int i = 0; i < p->n; i++) {
         p->ch[i].id = i; p->ch[i].cfg = cam[i]; p->ch[i].pipe = p;
         p->ch[i].disp_ring = &p->disp_rings[i];
@@ -333,6 +337,9 @@ void pipe_stop(pipeline_t *p)
         if (p->ch[i].enc_thr) pthread_join(p->ch[i].enc_thr, NULL);
         if (p->ch[i].enc) enc_close(p->ch[i].enc);
         if (p->ch[i].cap) cap_close(p->ch[i].cap);
+        ring_clear(&p->disp_rings[i]);
+        ring_clear(&p->enc_rings[i]);
+        ring_clear(&p->infer_rings[i]);
     }
 }
 
@@ -415,5 +422,6 @@ void pipe_print_stats(pipeline_t *p)
     p->stats.inf_total = 0;
     memset(&p->stats.inf_per_ch, 0, sizeof(p->stats.inf_per_ch));
     p->stats.disp_frames = 0;
+    p->stats.dropped_frames = 0;
     p->stats.last_report = now;
 }

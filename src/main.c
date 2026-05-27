@@ -327,7 +327,6 @@ int main(int argc, char **argv)
                                  "/tmp/chess_cam%d_%02d.nv12", cam_offset + i, g_save_seq);
                         FILE *fp = fopen(path, "wb");
                         if (fp) {
-                            int ysz = f.width * f.height;
                             uint8_t *s = f.ptr;
                             for (int r = 0; r < f.height; r++) {
                                 fwrite(s, 1, f.width, fp);
@@ -347,7 +346,7 @@ int main(int argc, char **argv)
                             g_save_seq++;
                         }
                     }
-                    if (f.fd >= 0) close(f.fd);
+                    frame_release(&f);
                 }
             }
             struct timeval now; gettimeofday(&now, NULL);

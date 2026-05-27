@@ -112,8 +112,24 @@ int enc_feed(encoder_t *e, const frame_t *f, uint8_t **out, size_t *olen)
     if (mpp_buffer_get(e->group, &buf, e->frame_size) != MPP_OK || !buf)
         return -1;
 
-    /* Copy NV12 frame data into MPP buffer */
-    memcpy(mpp_buffer_get_ptr(buf), f->ptr, e->frame_size);
+    /* Copy NV12 frame data into MPP buffer, stripping V4L2 stride if needed. */
+    uint8_t *dst = (uint8_t *)mpp_buffer_get_ptr(buf);
+    const uint8_t *src = (const uint8_t *)f->ptr;
+    if ((int)f->stride == e->w) {
+        memcpy(dst, src, e->frame_size);
+    } else {
+        for (int r = 0; r < e->h; r++) {
+            memcpy(dst, src, e->w);
+            dst += e->w;
+            src += f->stride;
+        }
+        src = (const uint8_t *)f->ptr + f->stride * e->h;
+        for (int r = 0; r < e->h / 2; r++) {
+            memcpy(dst, src, e->w);
+            dst += e->w;
+            src += f->stride;
+        }
+    }
 
     MppFrame frame = NULL;
     mpp_frame_init(&frame);

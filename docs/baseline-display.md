@@ -19,7 +19,7 @@ This is the verified baseline. All subsequent AI/RGA/model changes must not brea
 |-----------|----------|-------|
 | librga.so | **NO** | Not loaded when inference disabled |
 | librknnrt.so | **NO** | Not loaded when inference disabled |
-| /userdata/yolov5n_320.rknn | **NO** | Not accessed when inference disabled |
+| /userdata/yolov5.rknn | **NO** | Not accessed when inference disabled |
 | /sys/class/devfreq/fde40000.npu | **NO** | Not accessed when inference disabled |
 | librockchip_mpp.so | YES | Hardware encoder |
 | libwayland-client.so | YES | Display |
@@ -42,7 +42,7 @@ cd /userdata && LD_LIBRARY_PATH=/usr/lib ./rk3568_camera -c 1 --no-enc
 
 ### AI single-camera test (opt-in, requires model)
 ```sh
-cd /userdata && LD_LIBRARY_PATH=/usr/lib ./rk3568_camera -m /userdata/yolov5n_320.rknn -c 1 --no-enc
+cd /userdata && LD_LIBRARY_PATH=/usr/lib ./rk3568_camera -m /userdata/yolov5.rknn -c 1 --no-enc
 ```
 
 ## Scripts
@@ -76,7 +76,7 @@ When both are absent:
 - [ ] No `rknn_init` or `infer_open` in logs
 - [ ] Model file absence does not prevent startup
 - [ ] `./rk3568_camera -c 1 --no-enc` shows single camera
-- [ ] `./rk3568_camera -m /userdata/yolov5n_320.rknn -c 1 --no-enc` enables AI
+- [ ] `./rk3568_camera -m /userdata/yolov5.rknn -c 1 --no-enc` enables AI
 - [ ] `start_display.sh` works as stable demo script
 - [ ] `start_ai_cam0.sh` works as AI test script
 
