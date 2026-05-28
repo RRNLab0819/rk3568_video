@@ -444,19 +444,6 @@ static void draw_filled_rect(display_t *d,
     glDisableVertexAttribArray(d->osd_pos);
 }
 
-static void draw_filled_quad(display_t *d,
-                             float x0, float y0, float x1, float y1,
-                             float x2, float y2, float x3, float y3,
-                             float r, float g, float b, float a)
-{
-    float v[] = { x0,y0, x1,y1, x2,y2, x3,y3 };
-    glVertexAttribPointer(d->osd_pos, 2, GL_FLOAT, GL_FALSE, 0, v);
-    glEnableVertexAttribArray(d->osd_pos);
-    glUniform4f(d->osd_color_loc, r, g, b, a);
-    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-    glDisableVertexAttribArray(d->osd_pos);
-}
-
 /* Draw a line-loop outline rectangle */
 static void draw_outline_rect(display_t *d,
                                float x0, float y0, float x1, float y1,
@@ -993,30 +980,6 @@ static void draw_camera_rect(display_t *d, int cam,
     glDisableVertexAttribArray(d->loc_tex);
 }
 
-static void draw_camera_quad_uv(display_t *d, int cam,
-                                float x0, float y0, float x1, float y1,
-                                float x2, float y2, float x3, float y3,
-                                float u0, float v0, float u1, float v1,
-                                float u2, float v2, float u3, float v3)
-{
-    if (cam < 0 || cam >= d->n_cams || !d->has_frame[cam]) return;
-
-    glUseProgram(d->program);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d->texY[cam]);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, d->texUV[cam]);
-    glUniform1i(glGetUniformLocation(d->program, "u_texY"), 0);
-    glUniform1i(glGetUniformLocation(d->program, "u_texUV"), 1);
-
-    float v[] = { x0,y0,u0,v0, x1,y1,u1,v1, x2,y2,u2,v2, x3,y3,u3,v3 };
-    glVertexAttribPointer(d->loc_pos, 2, GL_FLOAT, GL_FALSE, 16, v);
-    glVertexAttribPointer(d->loc_tex, 2, GL_FLOAT, GL_FALSE, 16, v + 2);
-    glEnableVertexAttribArray(d->loc_pos);
-    glEnableVertexAttribArray(d->loc_tex);
-    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-    glDisableVertexAttribArray(d->loc_pos);
-    glDisableVertexAttribArray(d->loc_tex);
-}
-
 static void draw_osd_line(display_t *d, float x0, float y0, float x1, float y1,
                           float r, float g, float b, float a)
 {
@@ -1079,8 +1042,6 @@ static void draw_camera_detections_rect(display_t *d, int cam,
 
         draw_outline_rect(d, bx, by, bx + bw, by + bh,
                           0.08f, 1.0f, 0.20f, 1.0f);
-        draw_filled_rect(d, bx, by + bh - 0.030f, bx + bw * 0.36f, by + bh,
-                         0.02f, 0.12f, 0.04f, 0.88f);
     }
     pthread_mutex_unlock(&d->det_lock);
 }
@@ -1092,52 +1053,36 @@ static void draw_camera_rect_ai(display_t *d, int cam,
     draw_camera_detections_rect(d, cam, x0, y0, x1, y1);
 }
 
-static void draw_surround_reference_lines(display_t *d, float cx, float cy,
-                                          float car_w, float car_h,
-                                          float x0, float y0, float x1, float y1)
-{
-    glUseProgram(d->osd_prog);
-    float car_l = cx - car_w * 0.50f;
-    float car_r = cx + car_w * 0.50f;
-    float car_b = cy - car_h * 0.50f;
-    float car_t = cy + car_h * 0.50f;
-    float yellow = 0.78f;
-
-    draw_osd_line(d, car_l - 0.035f, car_t + 0.035f, x0 + 0.20f, y1 - 0.15f,
-                  1.0f, yellow, 0.18f, 1.0f);
-    draw_osd_line(d, car_r + 0.035f, car_t + 0.035f, x1 - 0.20f, y1 - 0.15f,
-                  1.0f, yellow, 0.18f, 1.0f);
-    draw_osd_line(d, car_l - 0.035f, car_b - 0.035f, x0 + 0.20f, y0 + 0.15f,
-                  1.0f, yellow, 0.18f, 1.0f);
-    draw_osd_line(d, car_r + 0.035f, car_b - 0.035f, x1 - 0.20f, y0 + 0.15f,
-                  1.0f, yellow, 0.18f, 1.0f);
-    draw_outline_rect(d, car_l - 0.055f, car_b - 0.055f, car_r + 0.055f, car_t + 0.055f,
-                      1.0f, 0.78f, 0.18f, 1.0f);
-    draw_outline_rect(d, car_l - 0.120f, car_b - 0.120f, car_r + 0.120f, car_t + 0.120f,
-                      0.75f, 0.75f, 0.78f, 1.0f);
-}
-
 static void draw_oem_icon(display_t *d, int idx, float cx, float cy, float z)
 {
     const float r = 0.86f, g = 0.94f, b = 1.0f, a = 1.0f;
     if (idx == OEM_AVM_SURROUND_MAIN || idx == OEM_AVM_SURROUND_FULL) {
-        draw_outline_rect(d, cx - z*0.35f, cy - z*0.45f, cx + z*0.35f, cy + z*0.45f, r,g,b,a);
-        draw_osd_line(d, cx - z*0.65f, cy, cx - z*0.42f, cy, r,g,b,a);
-        draw_osd_line(d, cx + z*0.42f, cy, cx + z*0.65f, cy, r,g,b,a);
+        draw_outline_rect(d, cx - z*0.24f, cy - z*0.42f, cx + z*0.24f, cy + z*0.42f, r,g,b,a);
+        draw_outline_rect(d, cx - z*0.42f, cy - z*0.58f, cx + z*0.42f, cy + z*0.58f, r,g,b,a);
+        draw_osd_line(d, cx - z*0.70f, cy - z*0.40f, cx - z*0.50f, cy - z*0.40f, r,g,b,a);
+        draw_osd_line(d, cx - z*0.70f, cy - z*0.40f, cx - z*0.70f, cy - z*0.20f, r,g,b,a);
+        draw_osd_line(d, cx + z*0.70f, cy - z*0.40f, cx + z*0.50f, cy - z*0.40f, r,g,b,a);
+        draw_osd_line(d, cx + z*0.70f, cy - z*0.40f, cx + z*0.70f, cy - z*0.20f, r,g,b,a);
+        draw_osd_line(d, cx - z*0.70f, cy + z*0.40f, cx - z*0.50f, cy + z*0.40f, r,g,b,a);
+        draw_osd_line(d, cx - z*0.70f, cy + z*0.40f, cx - z*0.70f, cy + z*0.20f, r,g,b,a);
+        draw_osd_line(d, cx + z*0.70f, cy + z*0.40f, cx + z*0.50f, cy + z*0.40f, r,g,b,a);
+        draw_osd_line(d, cx + z*0.70f, cy + z*0.40f, cx + z*0.70f, cy + z*0.20f, r,g,b,a);
         if (idx == OEM_AVM_SURROUND_FULL)
-            draw_outline_rect(d, cx - z*0.62f, cy - z*0.62f, cx + z*0.62f, cy + z*0.62f, r,g,b,a);
+            draw_outline_rect(d, cx - z*0.78f, cy - z*0.72f, cx + z*0.78f, cy + z*0.72f, r,g,b,a);
     } else if (idx == OEM_AVM_FRONT || idx == OEM_AVM_REAR) {
-        draw_outline_rect(d, cx - z*0.28f, cy - z*0.50f, cx + z*0.28f, cy + z*0.50f, r,g,b,a);
+        draw_outline_rect(d, cx - z*0.25f, cy - z*0.45f, cx + z*0.25f, cy + z*0.45f, r,g,b,a);
         float dir = (idx == OEM_AVM_FRONT) ? 1.0f : -1.0f;
-        draw_osd_line(d, cx, cy + dir*z*0.72f, cx, cy + dir*z*0.48f, r,g,b,a);
-        draw_osd_line(d, cx, cy + dir*z*0.72f, cx - z*0.16f, cy + dir*z*0.56f, r,g,b,a);
-        draw_osd_line(d, cx, cy + dir*z*0.72f, cx + z*0.16f, cy + dir*z*0.56f, r,g,b,a);
+        draw_osd_line(d, cx - z*0.55f, cy + dir*z*0.72f, cx + z*0.55f, cy + dir*z*0.72f, r,g,b,a);
+        draw_osd_line(d, cx - z*0.55f, cy + dir*z*0.72f, cx - z*0.28f, cy + dir*z*0.46f, r,g,b,a);
+        draw_osd_line(d, cx + z*0.55f, cy + dir*z*0.72f, cx + z*0.28f, cy + dir*z*0.46f, r,g,b,a);
+        draw_osd_line(d, cx, cy + dir*z*0.66f, cx, cy + dir*z*0.48f, r,g,b,a);
     } else if (idx == OEM_AVM_LEFT || idx == OEM_AVM_RIGHT) {
         float dir = (idx == OEM_AVM_RIGHT) ? 1.0f : -1.0f;
-        draw_outline_rect(d, cx - z*0.22f, cy - z*0.45f, cx + z*0.22f, cy + z*0.45f, r,g,b,a);
-        draw_osd_line(d, cx + dir*z*0.70f, cy, cx + dir*z*0.36f, cy, r,g,b,a);
-        draw_osd_line(d, cx + dir*z*0.70f, cy, cx + dir*z*0.52f, cy + z*0.16f, r,g,b,a);
-        draw_osd_line(d, cx + dir*z*0.70f, cy, cx + dir*z*0.52f, cy - z*0.16f, r,g,b,a);
+        draw_outline_rect(d, cx - z*0.22f, cy - z*0.44f, cx + z*0.22f, cy + z*0.44f, r,g,b,a);
+        draw_osd_line(d, cx + dir*z*0.46f, cy - z*0.52f, cx + dir*z*0.46f, cy + z*0.52f, r,g,b,a);
+        draw_osd_line(d, cx + dir*z*0.46f, cy + z*0.52f, cx + dir*z*0.72f, cy + z*0.32f, r,g,b,a);
+        draw_osd_line(d, cx + dir*z*0.46f, cy - z*0.52f, cx + dir*z*0.72f, cy - z*0.32f, r,g,b,a);
+        draw_osd_line(d, cx + dir*z*0.72f, cy + z*0.32f, cx + dir*z*0.72f, cy - z*0.32f, r,g,b,a);
     }
 }
 
@@ -1166,85 +1111,69 @@ static void draw_oem_toolbar(display_t *d)
 static void draw_oem_surround_panel(display_t *d, float x0, float y0, float x1, float y1)
 {
     glUseProgram(d->osd_prog);
-    draw_filled_rect(d, x0, y0, x1, y1, 0.004f, 0.004f, 0.006f, 1.0f);
+    draw_filled_rect(d, x0, y0, x1, y1, 0.006f, 0.007f, 0.009f, 1.0f);
 
     float w = x1 - x0, h = y1 - y0;
     float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
     float aspect = w / h;
     bool narrow = aspect < 0.68f;
-    float car_w = w * (narrow ? 0.34f : 0.22f);
-    float car_h = h * (narrow ? 0.50f : 0.48f);
-    float gap = 0.004f;
+    float car_w = w * (narrow ? 0.42f : 0.25f);
+    float car_h = h * (narrow ? 0.54f : 0.50f);
+    float gap = 0.010f;
 
     float car_l = cx - car_w * 0.50f;
     float car_r = cx + car_w * 0.50f;
     float car_b = cy - car_h * 0.50f;
     float car_t = cy + car_h * 0.50f;
-    float outer_l = x0 + w * 0.018f;
-    float outer_r = x1 - w * 0.018f;
-    float outer_b = y0 + h * 0.018f;
-    float outer_t = y1 - h * 0.018f;
-    float near_l = car_l - w * (narrow ? 0.16f : 0.11f);
-    float near_r = car_r + w * (narrow ? 0.16f : 0.11f);
-    float front_y = car_t + h * 0.045f;
-    float rear_y  = car_b - h * 0.045f;
-    float side_top = car_t - h * 0.030f;
-    float side_bot = car_b + h * 0.030f;
 
-    draw_camera_quad_uv(d, oem_slot_cam(d, 0),
-                        outer_l, outer_t,
-                        outer_r, outer_t,
-                        near_r, front_y,
-                        near_l, front_y,
-                        0.06f, 0.22f, 0.94f, 0.22f,
-                        0.76f, 0.72f, 0.24f, 0.72f);
-    draw_camera_quad_uv(d, oem_slot_cam(d, 2),
-                        near_l, rear_y,
-                        near_r, rear_y,
-                        outer_r, outer_b,
-                        outer_l, outer_b,
-                        0.24f, 0.28f, 0.76f, 0.28f,
-                        0.94f, 0.82f, 0.06f, 0.82f);
-    draw_camera_quad_uv(d, oem_slot_cam(d, 3),
-                        outer_l, outer_t - h * 0.12f,
-                        near_l, side_top,
-                        near_l, side_bot,
-                        outer_l, outer_b + h * 0.12f,
-                        0.18f, 0.16f, 0.78f, 0.34f,
-                        0.78f, 0.66f, 0.18f, 0.84f);
-    draw_camera_quad_uv(d, oem_slot_cam(d, 1),
-                        near_r, side_top,
-                        outer_r, outer_t - h * 0.12f,
-                        outer_r, outer_b + h * 0.12f,
-                        near_r, side_bot,
-                        0.22f, 0.34f, 0.82f, 0.16f,
-                        0.82f, 0.84f, 0.22f, 0.66f);
+    float pad_x = w * 0.055f;
+    float pad_y = h * 0.055f;
+    float zone_l = x0 + pad_x;
+    float zone_r = x1 - pad_x;
+    float zone_b = y0 + pad_y;
+    float zone_t = y1 - pad_y;
+    float ring1_l = car_l - w * (narrow ? 0.18f : 0.12f);
+    float ring1_r = car_r + w * (narrow ? 0.18f : 0.12f);
+    float ring1_b = car_b - h * 0.13f;
+    float ring1_t = car_t + h * 0.13f;
+    float ring2_l = car_l - w * (narrow ? 0.29f : 0.18f);
+    float ring2_r = car_r + w * (narrow ? 0.29f : 0.18f);
+    float ring2_b = car_b - h * 0.22f;
+    float ring2_t = car_t + h * 0.22f;
 
-    glUseProgram(d->osd_prog);
-    draw_filled_quad(d, outer_l, outer_t, outer_r, outer_t,
-                     near_r, front_y, near_l, front_y,
-                     0.0f, 0.0f, 0.0f, 0.18f);
-    draw_filled_quad(d, near_l, rear_y, near_r, rear_y,
-                     outer_r, outer_b, outer_l, outer_b,
-                     0.0f, 0.0f, 0.0f, 0.18f);
-    draw_filled_quad(d, outer_l, outer_t, outer_l + w * 0.12f, outer_t,
-                     near_l, side_top, outer_l, outer_t - h * 0.12f,
-                     0.0f, 0.0f, 0.0f, 0.78f);
-    draw_filled_quad(d, near_l, side_bot, outer_l + w * 0.12f, outer_b,
-                     outer_l, outer_b, outer_l, outer_b + h * 0.12f,
-                     0.0f, 0.0f, 0.0f, 0.78f);
-    draw_filled_quad(d, outer_r - w * 0.12f, outer_t, outer_r, outer_t,
-                     outer_r, outer_t - h * 0.12f, near_r, side_top,
-                     0.0f, 0.0f, 0.0f, 0.78f);
-    draw_filled_quad(d, outer_r, outer_b + h * 0.12f, outer_r, outer_b,
-                     outer_r - w * 0.12f, outer_b, near_r, side_bot,
-                     0.0f, 0.0f, 0.0f, 0.78f);
-    draw_filled_rect(d, x0, y0, x0 + w * 0.018f, y1, 0.0f, 0.0f, 0.0f, 1.0f);
-    draw_filled_rect(d, x1 - w * 0.018f, y0, x1, y1, 0.0f, 0.0f, 0.0f, 1.0f);
-    draw_filled_rect(d, car_l - w * (narrow ? 0.070f : 0.040f), car_b - h * 0.060f,
-                     car_r + w * (narrow ? 0.070f : 0.040f), car_t + h * 0.060f,
-                     0.005f, 0.005f, 0.006f, 1.0f);
-    draw_surround_reference_lines(d, cx, cy, car_w, car_h, x0, y0, x1, y1);
+    draw_filled_rect(d, zone_l, zone_b, zone_r, zone_t,
+                     0.018f, 0.020f, 0.024f, 1.0f);
+    draw_outline_rect(d, zone_l, zone_b, zone_r, zone_t,
+                      0.18f, 0.18f, 0.20f, 1.0f);
+
+    draw_filled_rect(d, ring2_l, ring2_b, ring2_r, ring2_t,
+                     0.030f, 0.032f, 0.038f, 1.0f);
+    draw_outline_rect(d, ring2_l, ring2_b, ring2_r, ring2_t,
+                      0.28f, 0.28f, 0.30f, 1.0f);
+    draw_outline_rect(d, ring1_l, ring1_b, ring1_r, ring1_t,
+                      0.95f, 0.74f, 0.16f, 1.0f);
+
+    draw_filled_rect(d, car_l - w * 0.060f, car_b - h * 0.075f,
+                     car_r + w * 0.060f, car_t + h * 0.075f,
+                     0.006f, 0.006f, 0.008f, 1.0f);
+
+    draw_osd_line(d, ring1_l, cy, zone_l + w * 0.030f, cy,
+                  0.75f, 0.75f, 0.78f, 1.0f);
+    draw_osd_line(d, ring1_r, cy, zone_r - w * 0.030f, cy,
+                  0.75f, 0.75f, 0.78f, 1.0f);
+    draw_osd_line(d, cx, ring1_t, cx, zone_t - h * 0.030f,
+                  0.75f, 0.75f, 0.78f, 1.0f);
+    draw_osd_line(d, cx, ring1_b, cx, zone_b + h * 0.030f,
+                  0.75f, 0.75f, 0.78f, 1.0f);
+    draw_osd_line(d, ring1_l, ring1_t, ring2_l, ring2_t,
+                  1.0f, 0.78f, 0.18f, 1.0f);
+    draw_osd_line(d, ring1_r, ring1_t, ring2_r, ring2_t,
+                  1.0f, 0.78f, 0.18f, 1.0f);
+    draw_osd_line(d, ring1_l, ring1_b, ring2_l, ring2_b,
+                  1.0f, 0.78f, 0.18f, 1.0f);
+    draw_osd_line(d, ring1_r, ring1_b, ring2_r, ring2_b,
+                  1.0f, 0.78f, 0.18f, 1.0f);
+
     draw_vehicle_placeholder(d, cx, cy, car_w, car_h);
     draw_outline_rect(d, x0 + gap, y0 + gap, x1 - gap, y1 - gap,
                       0.08f, 0.08f, 0.10f, 1.0f);
