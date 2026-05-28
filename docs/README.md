@@ -1,53 +1,27 @@
-# RK3568 Multi-Channel AI Security Camera
+# 文档索引
 
-Hardware: RK3568 + 4x fisheye cameras (1920x1080 NV12 @25fps) + Mali G52 GPU + NPU
+这里记录 RK3568 四路 AI 摄像头项目的运行、架构、状态和后续路线。GitHub 首页请优先看仓库根目录的 `README.md`。
 
-## Capabilities
+## 推荐阅读顺序
 
-| Feature | Status | Description |
-|---------|--------|-------------|
-| 4-ch V4L2 capture | Done | /dev/video0-3, 1920x1080 NV12, dma_buf mmap |
-| 2x2 quad display | Done | Wayland + EGL + GLES2, zero-copy YUV->RGB shader |
-| MPP H.265 encode | Done | Per-camera encoder, /tmp/cam_%d.h264 |
-| RKNN YOLOv5 inference | Done | Person-only detection, RGA dma_buf preprocess option |
-| Fisheye mesh undistort | Done | Per-camera Kannala-Brandt model, chessboard calibrated |
-| AVM layout display | Done | Sidebar + vehicle placeholder + 4 corrected views |
+1. [项目技术总结](PROJECT_TECH_SUMMARY_CN.md)
+   给老板或项目评审看的版本，说明已经完成什么、AVM 还差什么、后续怎么做。
 
-## Quick Start
+2. [当前状态](STATUS.md)
+   按“已完成 / 原型 / 待实现”区分真实进度，避免把 AVM 原型误认为真实拼接完成。
 
-```bash
-# Baseline 4-camera display
-cd /userdata && LD_LIBRARY_PATH=/usr/lib ./rk3568_camera
+3. [运行手册](RUNBOOK.md)
+   板端启动脚本、直接运行命令、NPU 设置和常见问题。
 
-# Single camera
-./rk3568_camera -c 1 --no-enc
+4. [架构说明](ARCHITECTURE.md)
+   采集、显示、编码、推理和 AVM 路线的模块关系。
 
-# AI inference (camera 0 only)
-./rk3568_camera -m /userdata/yolov5n_320.rknn -c 1 --no-enc --rga
+5. [后续任务](TODO.md)
+   下一阶段优先级，重点是鱼眼标定、BEV/IPM、距离估计和稳定性测试。
 
-# Fisheye correction (all 4 cameras)
-FISHEYE_MODE=1 ./rk3568_camera -c 4 --no-enc
+## 当前项目边界
 
-# AVM surround-view layout
-AVM_MODE=1 ./rk3568_camera -c 4 --no-enc
-```
-
-## Build
-
-Requires RK3568 Buildroot SDK at `/home/rrn/3568/3568_sdk`.
-
-```bash
-source /home/rrn/3568/3568_sdk/environment-setup
-make
-adb push rk3568_camera /userdata/
-```
-
-## Files
-
-```
-src/           C/C++ source (capture, display, encoder, inference, pipeline, fisheye)
-tools/         Python tools (verify, calibrate), C tools (grab_frame, RGA test)
-docs/          Documentation
-config.ini     Runtime configuration
-start*.sh      Launch scripts
-```
+- 四路采集、2x2 显示、RKNN 人体检测已经是可演示能力。
+- H.265 编码可用，但打开编码会增加系统负载，帧率和稳定性要按场景评估。
+- AVM 页面目前是 OEM 风格 UI 原型，不是正式 360 环视拼接。
+- 真正的鱼眼矫正、鸟瞰拼接和距离估计，需要先完成严格标定。

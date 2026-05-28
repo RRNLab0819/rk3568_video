@@ -16,66 +16,57 @@ adb shell chmod +x /userdata/rk3568_camera
 adb push config.ini /userdata/rk3568-camera/config.ini
 ```
 
-## Run Commands
+## Recommended Board Commands
 
-### Baseline display (no AI, no correction)
-
-```bash
-cd /userdata && LD_LIBRARY_PATH=/usr/lib ./rk3568_camera
-# or: ./rk3568_camera --no-enc
-```
-
-Shows 4 cameras in 2x2 grid.
-
-### Single camera
+Run from the RK3568 board.
 
 ```bash
-./rk3568_camera -c 1 --no-enc          # cam0 only
-./rk3568_camera -c 1 --cam 2 --no-enc  # cam2 only
+# Four-camera AI display, no encoder. Recommended for normal debugging.
+/userdata/start_ai.sh
+
+# Four-camera AI display + H.265 encoder.
+/userdata/start_ai_enc.sh
+
+# OEM AVM UI prototype, no encoder.
+/userdata/start_avm.sh
+
+# OEM AVM UI prototype + H.265 encoder.
+/userdata/start_avm_enc.sh
 ```
 
-### AI person detection (cam0)
+The RKNN model path should be:
 
 ```bash
-./rk3568_camera -m /userdata/yolov5n_320.rknn -c 1 --no-enc --rga
+/userdata/yolov5.rknn
 ```
 
-Red boxes overlay on display. Person-only by default.
-
-### 4-camera + AI
+## Direct Commands
 
 ```bash
-./rk3568_camera -m /userdata/yolov5n_320.rknn -c 4 --rga
+cd /userdata
+
+# Baseline 4-camera grid
+LD_LIBRARY_PATH=/usr/lib ./rk3568_camera -c 4 --no-enc
+
+# 4-camera AI grid
+LD_LIBRARY_PATH=/usr/lib ./rk3568_camera -m /userdata/yolov5.rknn -c 4 --no-enc
+
+# 4-camera AI grid + encoder
+LD_LIBRARY_PATH=/usr/lib ./rk3568_camera -m /userdata/yolov5.rknn -c 4
+
+# OEM AVM UI prototype
+OEM_AVM_MODE=1 LD_LIBRARY_PATH=/usr/lib ./rk3568_camera -m /userdata/yolov5.rknn -c 4 --no-enc
+
+# OEM AVM UI prototype + encoder
+OEM_AVM_MODE=1 LD_LIBRARY_PATH=/usr/lib ./rk3568_camera -m /userdata/yolov5.rknn -c 4
 ```
 
-Round-robin inference across all cameras.
+## Runtime Notes
 
-### Fisheye correction
-
-```bash
-# 2x2 grid with per-camera fisheye undistort
-FISHEYE_MODE=1 ./rk3568_camera -c 4 --no-enc
-
-# Single camera fullscreen debug
-FISHEYE_MODE=1 FISHEYE_DEBUG_CAM=0 ./rk3568_camera -c 4 --no-enc
-
-# Custom FOV (comma-separated per camera)
-FISHEYE_MODE=1 FISHEYE_FOV=124,155,161,170 ./rk3568_camera -c 4 --no-enc
-
-# Rotation/flip
-FISHEYE_MODE=1 FISHEYE_ROTATE=0,90,0,0 FISHEYE_FLIPX=0,1,0,0 ./rk3568_camera -c 4 --no-enc
-
-# Live frame dump
-FISHEYE_MODE=1 FISHEYE_DEBUG_CAM=0 FISHEYE_LIVE_DUMP=1 ./rk3568_camera -c 4 --no-enc
-```
-
-### AVM surround-view layout
-
-```bash
-AVM_MODE=1 ./rk3568_camera -c 4 --no-enc
-```
-
-Left sidebar + vehicle placeholder + 4 corrected fisheye views.
+- `--no-enc` disables MPP encoding and usually gives the most stable display/debug experience.
+- Enabling encoder adds MPP and DDR bandwidth pressure. Lower FPS compared with no-encode mode is expected.
+- `OEM_AVM_MODE=1` enables the current AVM UI prototype. It is not a calibrated 360 bird-view stitcher yet.
+- Do not rely on `AVM_MODE=1` for current builds; use `OEM_AVM_MODE=1` or the provided scripts.
 
 ## NPU Performance
 
@@ -89,18 +80,24 @@ echo performance > /sys/devices/platform/fde40000.npu/devfreq/fde40000.npu/gover
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| "Device or resource busy" | `killall rk3568_camera grab_frame; sleep 2` |
-| Black screen on start | Check Wayland: `ps | grep weston` |
-| Low FPS | Check NPU governor, close other apps |
-| ADB offline after display test | Known Mali/Wayland ADB issue; reboot board |
-| Fisheye black borders | Adjust per-camera FOV via `FISHEYE_FOV=...` |
-| Inference not working | Check model file exists, `--rga` flag, NPU governor |
+| Symptom | Action |
+|---------|--------|
+| `Device or resource busy` | `killall rk3568_camera grab_frame; sleep 2` |
+| Black screen on start | Check Wayland/Weston process and HDMI output |
+| AI does not start | Check `/userdata/yolov5.rknn` exists and NPU governor is performance |
+| FPS drops after enabling encoder | Expected load increase; compare with `--no-enc` |
+| AVM 1/2 pages do not look like real 360 | Expected current limitation; formal calibration/IPM is not complete |
+| Detection box has wrong geometry in future BEV view | Needs calibrated mapping; raw image boxes cannot be directly projected to BEV |
 
 ## Config File
 
-`/userdata/rk3568-camera/config.ini`:
+Typical board config path:
+
+```bash
+/userdata/rk3568-camera/config.ini
+```
+
+Important defaults:
 
 ```ini
 [camera]
@@ -115,11 +112,11 @@ bitrate = 4000000
 
 [inference]
 enabled = false
-model   = /userdata/yolov5n_320.rknn
+model   = /userdata/yolov5.rknn
 interval = 1
-conf    = 0.20
+conf    = 0.40
 nms     = 0.45
 
 [display]
-enabled  = true
+enabled = true
 ```

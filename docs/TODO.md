@@ -1,41 +1,45 @@
 # TODO
 
-Priority: P0 = critical, P1 = important, P2 = nice-to-have
+Priority: P0 = critical, P1 = important, P2 = nice-to-have.
 
-## P0 — Stability & Correctness
+## P0 - Calibration and Truthful AVM Foundation
 
-- [ ] Fix ADB disconnection when running Wayland display tests (GPU/Mali interaction)
-- [ ] Add `killall` safety before startup to prevent "device busy"
-- [ ] Verify fisheye mesh coverage with live video, not just offline scan
-- [ ] Test all 3 display modes (grid, fisheye, AVM) under continuous 24h run
+- [ ] Collect formal checkerboard images on the RK3568 board for all four cameras.
+- [ ] Run OpenCV fisheye calibration per camera and record intrinsics/distortion.
+- [ ] Validate GLES fisheye undistort mesh with live video, not only offline samples.
+- [ ] Define camera mounting order, rotation, flip and vehicle-relative orientation.
+- [ ] Add a checked-in calibration config format for per-camera parameters.
 
-## P1 — Feature Completion
+## P1 - Real Surround View
 
-- [ ] Detection box coordinate mapping: fisheye raw coords -> corrected display coords
-- [ ] AVM vehicle placeholder: replace GLES primitive with PNG texture
-- [ ] AVM sidebar: real text via bitmap font or FreeType
-- [ ] Per-camera FOV auto-detection from calibration (replace hardcoded defaults)
-- [ ] External config file for per-camera fisheye params (cx, cy, focal, k1-4, FOV)
-- [ ] Multi-camera AI: optimize round-robin scheduling for 4-ch real-time
+- [ ] Estimate per-camera extrinsics relative to vehicle/body frame.
+- [ ] Implement IPM/BEV ground-plane mapping for front/rear/left/right cameras.
+- [ ] Add blend masks to reduce visible seams between camera regions.
+- [ ] Replace primitive vehicle drawing with a cleaner vehicle texture/model.
+- [ ] Improve bottom toolbar icons and selected-state styling.
+- [ ] Keep current 2x2 grid path unchanged as stable fallback.
 
-## P2 — Enhancement
+## P1 - AI and Distance
 
-- [ ] AVM seamless stitching: multi-camera extrinsics + blend zone
-- [ ] AVM birdview: inverse perspective mapping + ground plane assumption
-- [ ] RTSP/HLS streaming from encoder output
-- [ ] Motion detection and event-triggered recording
-- [ ] OSD timestamp/text overlay per channel
-- [ ] Performance profiling: GPU utilization, NPU throughput, memory bandwidth
-- [ ] Remove unused `lens_6028_table` from fisheye_mesh.c (now replaced by Kannala-Brandt)
+- [ ] Map detection boxes through calibrated undistort/IPM geometry.
+- [ ] Use person foot-point on ground plane to estimate distance.
+- [ ] Add configurable warning zones/guide lines for front and rear views.
+- [ ] Run long-duration test for 4-ch AI + display + optional encoder.
 
-## Done (historical)
+## P2 - Product Enhancements
 
-- [x] 4-ch capture + 2x2 display
-- [x] MPP H.265 encoding
-- [x] RKNN YOLOv5 inference + person detection
-- [x] RGA dma_buf preprocessing
-- [x] fd/memory leak fix in ring_put
-- [x] Chessboard fisheye calibration (4 cameras)
-- [x] Fisheye GPU mesh undistort (Kannala-Brandt model)
-- [x] AVM layout mode (sidebar + vehicle + 4 views)
-- [x] Project cleanup and documentation
+- [ ] RTSP/HLS streaming from encoded output.
+- [ ] Motion detection and event-triggered recording.
+- [ ] OSD timestamp/text overlay per channel.
+- [ ] Performance profiling: GPU, NPU, DDR bandwidth, MPP encoder.
+- [ ] External UI assets for OEM-style toolbar and vehicle overlay.
+
+## Done
+
+- [x] Four-channel V4L2 capture.
+- [x] 2x2 Wayland/EGL/GLES2 display.
+- [x] RKNN YOLOv5 person detection.
+- [x] Detection boxes in stable display path.
+- [x] Optional MPP H.265 encoding.
+- [x] Startup scripts for AI and AVM prototype.
+- [x] Project technical summary document.
