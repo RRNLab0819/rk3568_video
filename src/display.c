@@ -42,7 +42,6 @@ typedef enum {
     OEM_AVM_REAR,
     OEM_AVM_LEFT,
     OEM_AVM_RIGHT,
-    OEM_AVM_MULTI,
     OEM_AVM_VIEW_COUNT
 } oem_avm_view_t;
 
@@ -260,12 +259,19 @@ static void keyboard_modifiers(void *data, struct wl_keyboard *keyboard, uint32_
     (void)mods_depressed; (void)mods_latched; (void)mods_locked; (void)group;
 }
 
+static void keyboard_repeat_info(void *data, struct wl_keyboard *keyboard,
+                                 int32_t rate, int32_t delay)
+{
+    (void)data; (void)keyboard; (void)rate; (void)delay;
+}
+
 static const struct wl_keyboard_listener keyboard_listener = {
     .keymap = keyboard_keymap,
     .enter = keyboard_enter,
     .leave = keyboard_leave,
     .key = keyboard_key,
     .modifiers = keyboard_modifiers,
+    .repeat_info = keyboard_repeat_info,
 };
 
 static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps)
@@ -301,6 +307,7 @@ static const struct wl_seat_listener seat_listener = {
 static void registry_handler(void *data, struct wl_registry *reg,
                               uint32_t id, const char *iface, uint32_t ver)
 {
+    (void)ver;
     display_t *d = (display_t *)data;
     if (strcmp(iface, "wl_compositor") == 0)
         g_compositor = (struct wl_compositor *)wl_registry_bind(
@@ -310,7 +317,7 @@ static void registry_handler(void *data, struct wl_registry *reg,
             reg, id, &xdg_wm_base_interface, 1);
     else if (strcmp(iface, "wl_seat") == 0 && d) {
         d->seat = (struct wl_seat *)wl_registry_bind(
-            reg, id, &wl_seat_interface, ver > 5 ? 5 : ver);
+            reg, id, &wl_seat_interface, 1);
         wl_seat_add_listener(d->seat, &seat_listener, d);
     }
 }
@@ -760,7 +767,6 @@ display_t *disp_open(int width, int height, int n_cameras)
             else if (strcmp(view, "rear") == 0) d->oem_view = OEM_AVM_REAR;
             else if (strcmp(view, "left") == 0) d->oem_view = OEM_AVM_LEFT;
             else if (strcmp(view, "right") == 0) d->oem_view = OEM_AVM_RIGHT;
-            else if (strcmp(view, "multi") == 0) d->oem_view = OEM_AVM_MULTI;
         }
     }
     if (d->mode == DISPLAY_MODE_OEM_AVM)
@@ -951,6 +957,28 @@ static void draw_camera_rect(display_t *d, int cam,
     glDisableVertexAttribArray(d->loc_tex);
 }
 
+static void draw_camera_quad(display_t *d, int cam,
+                             float x0, float y0, float x1, float y1,
+                             float x2, float y2, float x3, float y3)
+{
+    if (cam < 0 || cam >= d->n_cams || !d->has_frame[cam]) return;
+
+    glUseProgram(d->program);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d->texY[cam]);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, d->texUV[cam]);
+    glUniform1i(glGetUniformLocation(d->program, "u_texY"), 0);
+    glUniform1i(glGetUniformLocation(d->program, "u_texUV"), 1);
+
+    float v[] = { x0,y0,0,0, x1,y1,1,0, x2,y2,1,1, x3,y3,0,1 };
+    glVertexAttribPointer(d->loc_pos, 2, GL_FLOAT, GL_FALSE, 16, v);
+    glVertexAttribPointer(d->loc_tex, 2, GL_FLOAT, GL_FALSE, 16, v + 2);
+    glEnableVertexAttribArray(d->loc_pos);
+    glEnableVertexAttribArray(d->loc_tex);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableVertexAttribArray(d->loc_pos);
+    glDisableVertexAttribArray(d->loc_tex);
+}
+
 static void draw_osd_line(display_t *d, float x0, float y0, float x1, float y1,
                           float r, float g, float b, float a)
 {
@@ -963,15 +991,31 @@ static void draw_osd_line(display_t *d, float x0, float y0, float x1, float y1,
     glDisableVertexAttribArray(d->osd_pos);
 }
 
-static void draw_guide_lines(display_t *d, bool rear)
+static void draw_rear_guide_lines(display_t *d)
 {
-    (void)rear;
     glUseProgram(d->osd_prog);
     const float y0 = -0.68f, y1 = -0.18f, y2 = 0.28f;
     draw_osd_line(d, -0.45f, y0, -0.20f, y2, 1.0f, 0.78f, 0.18f, 1.0f);
     draw_osd_line(d,  0.45f, y0,  0.20f, y2, 1.0f, 0.78f, 0.18f, 1.0f);
     draw_osd_line(d, -0.38f, y1,  0.38f, y1, 1.0f, 0.78f, 0.18f, 1.0f);
     draw_osd_line(d, -0.25f, 0.05f, 0.25f, 0.05f, 0.95f, 0.20f, 0.20f, 1.0f);
+}
+
+static void draw_side_guide_lines(display_t *d, bool right_side)
+{
+    glUseProgram(d->osd_prog);
+    float dir = right_side ? 1.0f : -1.0f;
+    float near_x = dir * 0.18f;
+    float far_x  = dir * 0.72f;
+
+    draw_osd_line(d, near_x, -0.70f, near_x + dir * 0.16f, 0.62f,
+                  1.0f, 0.78f, 0.18f, 1.0f);
+    draw_osd_line(d, far_x, -0.72f, far_x - dir * 0.12f, 0.44f,
+                  1.0f, 0.78f, 0.18f, 1.0f);
+    draw_osd_line(d, near_x + dir * 0.04f, -0.28f, far_x - dir * 0.04f, -0.34f,
+                  1.0f, 0.78f, 0.18f, 0.95f);
+    draw_osd_line(d, near_x + dir * 0.08f, 0.16f, far_x - dir * 0.08f, 0.04f,
+                  0.95f, 0.20f, 0.20f, 1.0f);
 }
 
 static void draw_oem_icon(display_t *d, int idx, float cx, float cy, float z)
@@ -995,9 +1039,6 @@ static void draw_oem_icon(display_t *d, int idx, float cx, float cy, float z)
         draw_osd_line(d, cx + dir*z*0.70f, cy, cx + dir*z*0.36f, cy, r,g,b,a);
         draw_osd_line(d, cx + dir*z*0.70f, cy, cx + dir*z*0.52f, cy + z*0.16f, r,g,b,a);
         draw_osd_line(d, cx + dir*z*0.70f, cy, cx + dir*z*0.52f, cy - z*0.16f, r,g,b,a);
-    } else {
-        draw_outline_rect(d, cx - z*0.55f, cy - z*0.38f, cx - z*0.05f, cy + z*0.38f, r,g,b,a);
-        draw_outline_rect(d, cx + z*0.10f, cy - z*0.38f, cx + z*0.55f, cy + z*0.38f, r,g,b,a);
     }
 }
 
@@ -1026,20 +1067,40 @@ static void draw_oem_surround_panel(display_t *d, float x0, float y0, float x1, 
 
     float w = x1 - x0, h = y1 - y0;
     float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
-    float car_w = w * 0.18f, car_h = h * 0.42f;
-    float gap = 0.012f;
+    float car_w = w * 0.20f, car_h = h * 0.46f;
+    float gap = 0.014f;
 
-    draw_camera_rect(d, oem_slot_cam(d, 0), cx - car_w*0.65f, cy + car_h*0.52f + gap,
-                     cx + car_w*0.65f, y1 - gap);
-    draw_camera_rect(d, oem_slot_cam(d, 2), cx - car_w*0.65f, y0 + gap,
-                     cx + car_w*0.65f, cy - car_h*0.52f - gap);
-    draw_camera_rect(d, oem_slot_cam(d, 3), x0 + gap, cy - car_h*0.35f,
-                     cx - car_w*0.65f - gap, cy + car_h*0.35f);
-    draw_camera_rect(d, oem_slot_cam(d, 1), cx + car_w*0.65f + gap, cy - car_h*0.35f,
-                     x1 - gap, cy + car_h*0.35f);
+    float car_l = cx - car_w * 0.50f;
+    float car_r = cx + car_w * 0.50f;
+    float car_b = cy - car_h * 0.50f;
+    float car_t = cy + car_h * 0.50f;
+    float inset_x = w * 0.08f;
+
+    draw_camera_quad(d, oem_slot_cam(d, 0),
+                     x0 + inset_x, y1 - gap,
+                     x1 - inset_x, y1 - gap,
+                     car_r + gap, car_t + gap,
+                     car_l - gap, car_t + gap);
+    draw_camera_quad(d, oem_slot_cam(d, 2),
+                     car_l - gap, car_b - gap,
+                     car_r + gap, car_b - gap,
+                     x1 - inset_x, y0 + gap,
+                     x0 + inset_x, y0 + gap);
+    draw_camera_quad(d, oem_slot_cam(d, 3),
+                     x0 + gap, cy + car_h * 0.34f,
+                     car_l - gap, car_t - h * 0.05f,
+                     car_l - gap, car_b + h * 0.05f,
+                     x0 + gap, cy - car_h * 0.34f);
+    draw_camera_quad(d, oem_slot_cam(d, 1),
+                     car_r + gap, car_t - h * 0.05f,
+                     x1 - gap, cy + car_h * 0.34f,
+                     x1 - gap, cy - car_h * 0.34f,
+                     car_r + gap, car_b + h * 0.05f);
 
     glUseProgram(d->osd_prog);
     draw_vehicle_placeholder(d, cx, cy, car_w, car_h);
+    draw_outline_rect(d, car_l - gap, car_b - gap, car_r + gap, car_t + gap,
+                      0.02f, 0.02f, 0.025f, 1.0f);
     draw_outline_rect(d, x0 + gap, y0 + gap, x1 - gap, y1 - gap,
                       0.12f, 0.12f, 0.14f, 1.0f);
 }
@@ -1067,26 +1128,22 @@ static void draw_oem_avm_mode(display_t *d)
         break;
     case OEM_AVM_FRONT:
         draw_camera_rect(d, front, -1.0f, content_y0, 1.0f, content_y1);
-        draw_guide_lines(d, false);
         break;
     case OEM_AVM_REAR:
         draw_camera_rect(d, rear, -1.0f, content_y0, 1.0f, content_y1);
-        draw_guide_lines(d, true);
+        draw_rear_guide_lines(d);
         break;
     case OEM_AVM_LEFT:
         draw_camera_rect(d, left, -1.0f, content_y0, 1.0f, content_y1);
+        draw_side_guide_lines(d, false);
         break;
     case OEM_AVM_RIGHT:
         draw_camera_rect(d, right, -1.0f, content_y0, 1.0f, content_y1);
+        draw_side_guide_lines(d, true);
         break;
-    case OEM_AVM_MULTI:
     default:
-        draw_camera_rect(d, left, -1.0f, content_y0, -0.34f, content_y1);
-        draw_camera_rect(d, front, -0.34f, content_y0, 0.34f, content_y1);
-        draw_camera_rect(d, right, 0.34f, content_y0, 1.0f, content_y1);
-        glUseProgram(d->osd_prog);
-        draw_filled_rect(d, -0.342f, content_y0, -0.338f, content_y1, 0.02f,0.02f,0.02f,1.0f);
-        draw_filled_rect(d,  0.338f, content_y0,  0.342f, content_y1, 0.02f,0.02f,0.02f,1.0f);
+        draw_oem_surround_panel(d, -1.0f, content_y0, -0.18f, content_y1);
+        draw_camera_rect(d, d->oem_main_cam, -0.18f, content_y0, 1.0f, content_y1);
         break;
     }
 
