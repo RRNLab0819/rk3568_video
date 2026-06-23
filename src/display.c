@@ -965,56 +965,23 @@ static void draw_fisheye_grid_mode(display_t *d)
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
-static void rotate_flip_uv_local(float *u, float *v,
-                                 int rotate_deg, bool flip_x, bool flip_y)
+static void inverse_rotate_flip_uv_local(float *u, float *v,
+                                         int rotate_deg, bool flip_x, bool flip_y)
 {
-    float tu = *u - 0.5f;
-    float tv = *v - 0.5f;
-    float ru, rv;
-    switch (rotate_deg) {
-    case 90:  ru = -tv; rv =  tu; break;
-    case 180: ru = -tu; rv = -tv; break;
-    case 270: ru =  tv; rv = -tu; break;
-    default:  ru =  tu; rv =  tv; break;
-    }
+    float ru = *u - 0.5f;
+    float rv = *v - 0.5f;
     if (flip_x) ru = -ru;
     if (flip_y) rv = -rv;
-    *u = ru + 0.5f;
-    *v = rv + 0.5f;
-}
 
-static void fisheye_output_to_raw_uv(display_t *d, int cam,
-                                     float out_u, float out_v,
-                                     float *raw_u, float *raw_v)
-{
-    const fisheye_cam_t *fc = &g_fisheye_cams[cam];
-    float fov_h = d->fisheye_fov[cam];
-    float fov_v = fov_h * 1080.0f / 1920.0f;
-    float fov_h_rad = fov_h * (float)(M_PI / 180.0);
-    float fov_v_rad = fov_v * (float)(M_PI / 180.0);
-
-    float theta = (out_u - 0.5f) * fov_h_rad;
-    float phi   = (out_v - 0.5f) * fov_v_rad;
-    float cos_theta = cosf(theta);
-    float dx = fc->focal * tanf(theta);
-    float dy = fc->focal * tanf(phi) / cos_theta;
-    float r_ideal = sqrtf(dx * dx + dy * dy);
-    float inc_angle = atan2f(r_ideal, fc->focal);
-    float r_real = lens_6028_radius(inc_angle, fc);
-
-    float sx, sy;
-    if (r_ideal > 1e-6f) {
-        sx = fc->cx + dx * (r_real / r_ideal);
-        sy = fc->cy + dy * (r_real / r_ideal);
-    } else {
-        sx = fc->cx;
-        sy = fc->cy;
+    float tu, tv;
+    switch (rotate_deg) {
+    case 90:  tu =  rv; tv = -ru; break;
+    case 180: tu = -ru; tv = -rv; break;
+    case 270: tu = -rv; tv =  ru; break;
+    default:  tu =  ru; tv =  rv; break;
     }
-
-    *raw_u = sx / (float)fc->src_w;
-    *raw_v = sy / (float)fc->src_h;
-    rotate_flip_uv_local(raw_u, raw_v, d->fisheye_rot[cam],
-                         d->fisheye_flipx[cam], d->fisheye_flipy[cam]);
+    *u = tu + 0.5f;
+    *v = tv + 0.5f;
 }
 
 static bool fisheye_raw_to_output_uv(display_t *d, int cam,
@@ -1022,32 +989,57 @@ static bool fisheye_raw_to_output_uv(display_t *d, int cam,
                                      float *out_u, float *out_v)
 {
     const fisheye_cam_t *fc = &g_fisheye_cams[cam];
-    float target_u = raw_x / (float)fc->src_w;
-    float target_v = raw_y / (float)fc->src_h;
-    float best_d2 = 999.0f;
-    float best_u = 0.5f, best_v = 0.5f;
-    const int samples = 80;
+    float src_u = raw_x / (float)fc->src_w;
+    float src_v = raw_y / (float)fc->src_h;
 
-    for (int y = 0; y <= samples; y++) {
-        float v = (float)y / (float)samples;
-        for (int x = 0; x <= samples; x++) {
-            float u = (float)x / (float)samples;
-            float ru, rv;
-            fisheye_output_to_raw_uv(d, cam, u, v, &ru, &rv);
-            float du = ru - target_u;
-            float dv = rv - target_v;
-            float d2 = du * du + dv * dv;
-            if (d2 < best_d2) {
-                best_d2 = d2;
-                best_u = u;
-                best_v = v;
-            }
+    if (src_u < -0.05f || src_u > 1.05f || src_v < -0.05f || src_v > 1.05f)
+        return false;
+
+    inverse_rotate_flip_uv_local(&src_u, &src_v, d->fisheye_rot[cam],
+                                 d->fisheye_flipx[cam], d->fisheye_flipy[cam]);
+
+    float sx = src_u * (float)fc->src_w;
+    float sy = src_v * (float)fc->src_h;
+    float dx = sx - fc->cx;
+    float dy = sy - fc->cy;
+    float r_real = sqrtf(dx * dx + dy * dy);
+
+    float inc = 0.0f;
+    if (r_real > 1e-5f) {
+        inc = r_real / fc->focal;
+        for (int iter = 0; iter < 8; iter++) {
+            float t2 = inc * inc;
+            float t4 = t2 * t2;
+            float t6 = t4 * t2;
+            float t8 = t4 * t4;
+            float poly = 1.0f + fc->k[0]*t2 + fc->k[1]*t4 +
+                         fc->k[2]*t6 + fc->k[3]*t8;
+            float f = fc->focal * inc * poly - r_real;
+            float deriv = fc->focal * (1.0f + 3.0f*fc->k[0]*t2 +
+                          5.0f*fc->k[1]*t4 + 7.0f*fc->k[2]*t6 +
+                          9.0f*fc->k[3]*t8);
+            if (fabsf(deriv) < 1e-6f) break;
+            inc -= f / deriv;
+            if (inc < 0.0f) inc = 0.0f;
         }
     }
 
-    *out_u = best_u;
-    *out_v = best_v;
-    return best_d2 < 0.0025f;
+    float r_ideal = fc->focal * tanf(inc);
+    float ix = 0.0f, iy = 0.0f;
+    if (r_real > 1e-5f) {
+        ix = dx * (r_ideal / r_real);
+        iy = dy * (r_ideal / r_real);
+    }
+
+    float theta = atan2f(ix, fc->focal);
+    float phi = atan2f(iy * cosf(theta), fc->focal);
+    float fov_h_rad = d->fisheye_fov[cam] * (float)(M_PI / 180.0);
+    float fov_v_rad = fov_h_rad * 1080.0f / 1920.0f;
+
+    *out_u = theta / fov_h_rad + 0.5f;
+    *out_v = phi / fov_v_rad + 0.5f;
+    return (*out_u >= -0.05f && *out_u <= 1.05f &&
+            *out_v >= -0.05f && *out_v <= 1.05f);
 }
 
 static void draw_fisheye_detections(display_t *d)
@@ -1064,18 +1056,36 @@ static void draw_fisheye_detections(display_t *d)
             detection_t *dt = &d->dets[cam][i];
             if (dt->class_id != 0) continue;
 
-            float xs[4] = { dt->x, dt->x + dt->w, dt->x + dt->w, dt->x };
-            float ys[4] = { dt->y, dt->y, dt->y + dt->h, dt->y + dt->h };
             float min_u = 1.0f, min_v = 1.0f, max_u = 0.0f, max_v = 0.0f;
             bool ok = false;
-            for (int p = 0; p < 4; p++) {
-                float u, v;
-                if (fisheye_raw_to_output_uv(d, cam, xs[p], ys[p], &u, &v)) {
-                    if (u < min_u) min_u = u;
-                    if (u > max_u) max_u = u;
-                    if (v < min_v) min_v = v;
-                    if (v > max_v) max_v = v;
-                    ok = true;
+
+            const int steps = 12;
+            for (int edge = 0; edge < 4; edge++) {
+                for (int s = 0; s <= steps; s++) {
+                    float t = (float)s / (float)steps;
+                    float x, y;
+                    if (edge == 0) {
+                        x = dt->x + dt->w * t;
+                        y = dt->y;
+                    } else if (edge == 1) {
+                        x = dt->x + dt->w;
+                        y = dt->y + dt->h * t;
+                    } else if (edge == 2) {
+                        x = dt->x + dt->w * (1.0f - t);
+                        y = dt->y + dt->h;
+                    } else {
+                        x = dt->x;
+                        y = dt->y + dt->h * (1.0f - t);
+                    }
+
+                    float u, v;
+                    if (fisheye_raw_to_output_uv(d, cam, x, y, &u, &v)) {
+                        if (u < min_u) min_u = u;
+                        if (u > max_u) max_u = u;
+                        if (v < min_v) min_v = v;
+                        if (v > max_v) max_v = v;
+                        ok = true;
+                    }
                 }
             }
             if (!ok) continue;
