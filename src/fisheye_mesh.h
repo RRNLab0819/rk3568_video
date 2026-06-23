@@ -12,7 +12,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* Per-camera calibration (chessboard calibrated) */
+/* Per-camera calibration. The current mesh uses one focal value, so YAML
+ * OpenCV fx/fy values are averaged when loaded at runtime. */
 typedef struct {
     float cx, cy;       /* optical center in pixels */
     float focal;        /* focal length in pixels (Kannala-Brandt model) */
@@ -78,7 +79,12 @@ void fisheye_mesh_dump_uv_debug(const char *path,
                                 float fov_h, int out_w, int out_h,
                                 int rotate_deg, bool flip_x, bool flip_y);
 
-/* Pre-defined camera calibrations */
-extern const fisheye_cam_t g_fisheye_cams[4];
+/* Built-in fallback camera calibrations, optionally overridden at startup. */
+extern fisheye_cam_t g_fisheye_cams[4];
+
+/* Load calib_videoN.yaml files from a directory and override g_fisheye_cams.
+ * The YAML parser is intentionally small and supports the OpenCV output used
+ * by tools/calibrate_chess.py. Returns the number of cameras loaded. */
+int fisheye_load_calibration_dir(const char *dir, int n_cams);
 
 #endif

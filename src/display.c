@@ -716,6 +716,12 @@ display_t *disp_open(int width, int height, int n_cameras)
         printf("[display] DEBUG: single camera %d fullscreen\n", debug_cam);
     }
 
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
+        const char *calib_dir = getenv("FISHEYE_CALIB_DIR");
+        if (calib_dir && calib_dir[0])
+            fisheye_load_calibration_dir(calib_dir, d->n_cams);
+    }
+
     /* ---- Build meshes ---- */
     fisheye_uv_stats_t uv_stats[4];
 

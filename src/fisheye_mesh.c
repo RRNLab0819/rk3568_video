@@ -196,8 +196,9 @@ static const float lens_6028_table[LENS_6028_ROWS][4] = {
     {90.0f, 2.238082725f, 26350.990230000f, -0.999900000f},
 };
 
-/* Camera calibrations — chessboard 2026-05-27, Kannala-Brandt fisheye model */
-const fisheye_cam_t g_fisheye_cams[4] = {
+/* Fallback camera calibrations. Runtime calib_videoN.yaml files can override
+ * these values through fisheye_load_calibration_dir(). */
+fisheye_cam_t g_fisheye_cams[4] = {
     { .cx = 970.8f, .cy = 542.8f, .focal = 558.4f,
       .k = { 0.057900f, -0.093996f, -0.015318f, 0.129271f },
       .src_w = 1920, .src_h = 1080 },
@@ -211,6 +212,123 @@ const fisheye_cam_t g_fisheye_cams[4] = {
       .k = { 0.012548f, -0.067906f, 0.114628f, -0.050734f },
       .src_w = 1920, .src_h = 1080 },
 };
+
+static int scan_floats_from_line(const char *line, float *out, int max_count)
+{
+    int n = 0;
+    const char *p = line;
+    while (*p && n < max_count) {
+        while (*p && !((*p >= '0' && *p <= '9') ||
+                       ((*p == '-' || *p == '+') &&
+                        ((p[1] >= '0' && p[1] <= '9') || p[1] == '.')) ||
+                       (*p == '.' && (p[1] >= '0' && p[1] <= '9')))) {
+            p++;
+        }
+        if (!*p) break;
+        char *endp = NULL;
+        double v = strtod(p, &endp);
+        if (endp == p) {
+            p++;
+            continue;
+        }
+        out[n++] = (float)v;
+        p = endp;
+    }
+    return n;
+}
+
+static int load_one_calibration_yaml(const char *path, fisheye_cam_t *cam)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) return -1;
+
+    char line[256];
+    float k_mat[9] = {0};
+    float dist[4] = {0};
+    int k_count = 0;
+    int d_count = 0;
+    int state = 0; /* 0 normal, 1 camera_matrix, 2 dist_coeffs */
+    int width = cam->src_w;
+    int height = cam->src_h;
+
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "image_width:")) {
+            int v = 0;
+            if (sscanf(line, "image_width: %d", &v) == 1 && v > 0) width = v;
+            state = 0;
+            continue;
+        }
+        if (strstr(line, "image_height:")) {
+            int v = 0;
+            if (sscanf(line, "image_height: %d", &v) == 1 && v > 0) height = v;
+            state = 0;
+            continue;
+        }
+        if (strstr(line, "camera_matrix:")) {
+            state = 1;
+            continue;
+        }
+        if (strstr(line, "dist_coeffs:")) {
+            state = 2;
+            continue;
+        }
+        if (state == 1 && k_count < 9) {
+            float vals[4];
+            int n = scan_floats_from_line(line, vals, 4);
+            for (int i = 0; i < n && k_count < 9; i++)
+                k_mat[k_count++] = vals[i];
+            if (k_count >= 9) state = 0;
+            continue;
+        }
+        if (state == 2 && d_count < 4) {
+            float vals[4];
+            int n = scan_floats_from_line(line, vals, 4);
+            for (int i = 0; i < n && d_count < 4; i++)
+                dist[d_count++] = vals[i];
+            if (d_count >= 4) state = 0;
+            continue;
+        }
+    }
+
+    fclose(fp);
+
+    if (k_count < 9 || d_count < 4 || width <= 0 || height <= 0) {
+        fprintf(stderr, "[fisheye] invalid calibration yaml: %s (K=%d D=%d %dx%d)\n",
+                path, k_count, d_count, width, height);
+        return -1;
+    }
+
+    float fx = k_mat[0];
+    float fy = k_mat[4];
+    cam->focal = (fx + fy) * 0.5f;
+    cam->cx = k_mat[2];
+    cam->cy = k_mat[5];
+    for (int i = 0; i < 4; i++)
+        cam->k[i] = dist[i];
+    cam->src_w = width;
+    cam->src_h = height;
+
+    printf("[fisheye] loaded %s: size=%dx%d fx=%.2f fy=%.2f focal=%.2f cx=%.2f cy=%.2f k=[%.6f %.6f %.6f %.6f]\n",
+           path, width, height, fx, fy, cam->focal, cam->cx, cam->cy,
+           cam->k[0], cam->k[1], cam->k[2], cam->k[3]);
+    return 0;
+}
+
+int fisheye_load_calibration_dir(const char *dir, int n_cams)
+{
+    if (!dir || !dir[0]) return 0;
+    if (n_cams > 4) n_cams = 4;
+
+    int loaded = 0;
+    for (int i = 0; i < n_cams; i++) {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/calib_video%d.yaml", dir, i);
+        if (load_one_calibration_yaml(path, &g_fisheye_cams[i]) == 0)
+            loaded++;
+    }
+    printf("[fisheye] calibration dir=%s loaded=%d/%d\n", dir, loaded, n_cams);
+    return loaded;
+}
 
 /* ------------------------------------------------------------------ */
 /* Lens lookup (Kannala-Brandt)                                       */

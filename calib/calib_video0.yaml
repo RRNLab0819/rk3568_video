@@ -1,0 +1,58 @@
+model: opencv_fisheye
+image_width: 1920
+image_height: 1080
+camera_matrix:
+- - 540.5763727114339
+  - 0.0
+  - 971.3587321164636
+- - 0.0
+  - 542.1795575121198
+  - 545.1264453837142
+- - 0.0
+  - 0.0
+  - 1.0
+dist_coeffs:
+- 0.023793855735216925
+- 0.007498003229577771
+- -0.026295613347019093
+- 0.009308381053653749
+reprojection_error: 0.29935022657175403
+per_image_errors:
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/001.jpg: 0.28630140745395927
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/002.jpg: 0.1586073790516604
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/003.jpg: 0.23131652336486344
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/004.jpg: 0.3923163173976989
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/005.jpg: 0.2311159247274525
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/006.jpg: 0.22817801250887118
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/007.jpg: 0.35906380883055733
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/009.jpg: 0.25437752643233663
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/010.jpg: 0.25330945902503166
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/011.jpg: 0.2598028557964877
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/012.jpg: 0.3232237484134011
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/013.jpg: 0.25857780127360014
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/015.jpg: 0.29116133798674504
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/016.jpg: 0.22613594375664214
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/017.jpg: 0.3041057974174722
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/018.jpg: 0.2117907036970221
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/019.jpg: 0.3053615684774889
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/020.jpg: 0.23784032884371573
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/021.jpg: 0.3823827992454922
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/022.jpg: 0.3261761412963557
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/023.jpg: 0.3261608484464491
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/024.jpg: 0.22906916240506406
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/025.jpg: 0.3522920159725463
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/026.jpg: 0.2537408312154762
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/027.jpg: 0.5938416901125646
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/028.jpg: 0.27959054019925067
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/029.jpg: 0.2639890140832604
+  /home/rrn/chess_calibration/session_20260623_202306/cam0/030.jpg: 0.2625104044802072
+excluded_images:
+- /home/rrn/chess_calibration/session_20260623_202306/cam0/014.jpg
+calibration_mode: robust
+camera_name: video0
+board:
+  squares_x: 9
+  squares_y: 6
+  square_length_mm: 40.0
+  marker_length_mm: 30.0
+  dictionary: DICT_4X4_50
