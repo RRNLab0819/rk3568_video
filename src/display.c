@@ -26,6 +26,7 @@
 #include <GLES2/gl2ext.h>
 #include <drm/drm_fourcc.h>
 #include <pthread.h>
+#include <math.h>
 
 /* ------------------------------------------------------------------ */
 
@@ -102,6 +103,10 @@ struct display_s {
     GLuint      grid_vbo_tex[4];
     GLuint      grid_ibo[4];
     int         grid_nidx[4];
+    float       fisheye_fov[4];
+    int         fisheye_rot[4];
+    bool        fisheye_flipx[4];
+    bool        fisheye_flipy[4];
 
 
     /* OSD detection overlay */
@@ -742,6 +747,10 @@ display_t *disp_open(int width, int height, int n_cameras)
             printf("  cam%d: fov=%.0f rot=%d flip=%d,%d rect=[%.2f,%.2f,%.2f,%.2f]\n",
                    i, fov_cam[i], rot_cam[i], flipx_cam[i], flipy_cam[i],
                    x0, y0, tw, th);
+            d->fisheye_fov[i] = fov_cam[i];
+            d->fisheye_rot[i] = rot_cam[i];
+            d->fisheye_flipx[i] = flipx_cam[i];
+            d->fisheye_flipy[i] = flipy_cam[i];
 
             fisheye_mesh_t m;
             if (fisheye_mesh_build_ex(&m, &g_fisheye_cams[i],
@@ -954,6 +963,135 @@ static void draw_fisheye_grid_mode(display_t *d)
     }
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+static void rotate_flip_uv_local(float *u, float *v,
+                                 int rotate_deg, bool flip_x, bool flip_y)
+{
+    float tu = *u - 0.5f;
+    float tv = *v - 0.5f;
+    float ru, rv;
+    switch (rotate_deg) {
+    case 90:  ru = -tv; rv =  tu; break;
+    case 180: ru = -tu; rv = -tv; break;
+    case 270: ru =  tv; rv = -tu; break;
+    default:  ru =  tu; rv =  tv; break;
+    }
+    if (flip_x) ru = -ru;
+    if (flip_y) rv = -rv;
+    *u = ru + 0.5f;
+    *v = rv + 0.5f;
+}
+
+static void fisheye_output_to_raw_uv(display_t *d, int cam,
+                                     float out_u, float out_v,
+                                     float *raw_u, float *raw_v)
+{
+    const fisheye_cam_t *fc = &g_fisheye_cams[cam];
+    float fov_h = d->fisheye_fov[cam];
+    float fov_v = fov_h * 1080.0f / 1920.0f;
+    float fov_h_rad = fov_h * (float)(M_PI / 180.0);
+    float fov_v_rad = fov_v * (float)(M_PI / 180.0);
+
+    float theta = (out_u - 0.5f) * fov_h_rad;
+    float phi   = (out_v - 0.5f) * fov_v_rad;
+    float cos_theta = cosf(theta);
+    float dx = fc->focal * tanf(theta);
+    float dy = fc->focal * tanf(phi) / cos_theta;
+    float r_ideal = sqrtf(dx * dx + dy * dy);
+    float inc_angle = atan2f(r_ideal, fc->focal);
+    float r_real = lens_6028_radius(inc_angle, fc);
+
+    float sx, sy;
+    if (r_ideal > 1e-6f) {
+        sx = fc->cx + dx * (r_real / r_ideal);
+        sy = fc->cy + dy * (r_real / r_ideal);
+    } else {
+        sx = fc->cx;
+        sy = fc->cy;
+    }
+
+    *raw_u = sx / (float)fc->src_w;
+    *raw_v = sy / (float)fc->src_h;
+    rotate_flip_uv_local(raw_u, raw_v, d->fisheye_rot[cam],
+                         d->fisheye_flipx[cam], d->fisheye_flipy[cam]);
+}
+
+static bool fisheye_raw_to_output_uv(display_t *d, int cam,
+                                     float raw_x, float raw_y,
+                                     float *out_u, float *out_v)
+{
+    const fisheye_cam_t *fc = &g_fisheye_cams[cam];
+    float target_u = raw_x / (float)fc->src_w;
+    float target_v = raw_y / (float)fc->src_h;
+    float best_d2 = 999.0f;
+    float best_u = 0.5f, best_v = 0.5f;
+    const int samples = 80;
+
+    for (int y = 0; y <= samples; y++) {
+        float v = (float)y / (float)samples;
+        for (int x = 0; x <= samples; x++) {
+            float u = (float)x / (float)samples;
+            float ru, rv;
+            fisheye_output_to_raw_uv(d, cam, u, v, &ru, &rv);
+            float du = ru - target_u;
+            float dv = rv - target_v;
+            float d2 = du * du + dv * dv;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                best_u = u;
+                best_v = v;
+            }
+        }
+    }
+
+    *out_u = best_u;
+    *out_v = best_v;
+    return best_d2 < 0.0025f;
+}
+
+static void draw_fisheye_detections(display_t *d)
+{
+    pthread_mutex_lock(&d->det_lock);
+    glUseProgram(d->osd_prog);
+    glLineWidth(2.0f);
+    glUniform4f(d->osd_color_loc, 0.1f, 1.0f, 0.35f, 1.0f);
+
+    for (int cam = 0; cam < d->n_cams && cam < 4; cam++) {
+        if (!d->has_frame[cam] || d->det_count[cam] <= 0) continue;
+
+        for (int i = 0; i < d->det_count[cam]; i++) {
+            detection_t *dt = &d->dets[cam][i];
+            if (dt->class_id != 0) continue;
+
+            float xs[4] = { dt->x, dt->x + dt->w, dt->x + dt->w, dt->x };
+            float ys[4] = { dt->y, dt->y, dt->y + dt->h, dt->y + dt->h };
+            float min_u = 1.0f, min_v = 1.0f, max_u = 0.0f, max_v = 0.0f;
+            bool ok = false;
+            for (int p = 0; p < 4; p++) {
+                float u, v;
+                if (fisheye_raw_to_output_uv(d, cam, xs[p], ys[p], &u, &v)) {
+                    if (u < min_u) min_u = u;
+                    if (u > max_u) max_u = u;
+                    if (v < min_v) min_v = v;
+                    if (v > max_v) max_v = v;
+                    ok = true;
+                }
+            }
+            if (!ok) continue;
+
+            float bx0 = -1.0f + min_u * 2.0f;
+            float bx1 = -1.0f + max_u * 2.0f;
+            float by1 =  1.0f - min_v * 2.0f;
+            float by0 =  1.0f - max_v * 2.0f;
+            float vtx[] = { bx0,by0, bx1,by0, bx1,by1, bx0,by1 };
+            glVertexAttribPointer(d->osd_pos, 2, GL_FLOAT, GL_FALSE, 0, vtx);
+            glEnableVertexAttribArray(d->osd_pos);
+            glDrawArrays(GL_LINE_LOOP, 0, 4);
+            glDisableVertexAttribArray(d->osd_pos);
+        }
+    }
+    pthread_mutex_unlock(&d->det_lock);
 }
 
 static int oem_slot_cam(display_t *d, int slot)
@@ -1243,8 +1381,19 @@ void disp_draw(display_t *d)
     case DISPLAY_MODE_OEM_AVM:       draw_oem_avm_mode(d);      break;
     }
 
-    /* Detection overlay (grid modes only — AVM can add later) */
-    if (d->mode != DISPLAY_MODE_OEM_AVM) {
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
+        draw_fisheye_detections(d);
+    }
+
+    /* Detection boxes are in raw camera coordinates. In fisheye mode the image
+     * is warped by a mesh, so raw boxes are misleading unless explicitly enabled
+     * for debugging. */
+    bool draw_raw_dets = (d->mode == DISPLAY_MODE_GRID);
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
+        const char *raw = getenv("FISHEYE_DET_OVERLAY");
+        draw_raw_dets = (raw && raw[0] == '1');
+    }
+    if (draw_raw_dets) {
         int cols = (d->n_cams <= 2) ? d->n_cams : 2;
         int rows = (d->n_cams <= 2) ? 1 : 2;
         float qw = 2.0f / cols, qh = 2.0f / rows;
