@@ -137,6 +137,29 @@ bool fisheye_raw_pixel_to_view_uv(const fisheye_cam_t *cam,
                                   float raw_x, float raw_y,
                                   float *out_u, float *out_v)
 {
+    float rx, ry, rz;
+    if (!fisheye_raw_pixel_to_camera_ray(cam, view, raw_x, raw_y, &rx, &ry, &rz))
+        return false;
+
+    float vx, vy, vz;
+    camera_to_view_ray(view, rx, ry, rz, &vx, &vy, &vz);
+    if (vz <= 1e-5f) return false;
+
+    float theta = atan2f(vx, vz);
+    float phi = atan2f(vy * cosf(theta), vz);
+    float fov_h = view->fov_h_deg * (float)(M_PI / 180.0);
+    float fov_v = fov_h * (float)view->out_h / (float)view->out_w;
+    *out_u = theta / fov_h + 0.5f;
+    *out_v = phi / fov_v + 0.5f;
+    return (*out_u >= -0.05f && *out_u <= 1.05f &&
+            *out_v >= -0.05f && *out_v <= 1.05f);
+}
+
+bool fisheye_raw_pixel_to_camera_ray(const fisheye_cam_t *cam,
+                                     const fisheye_view_t *view,
+                                     float raw_x, float raw_y,
+                                     float *ray_x, float *ray_y, float *ray_z)
+{
     float src_u = raw_x / (float)cam->src_w;
     float src_v = raw_y / (float)cam->src_h;
     if (src_u < -0.05f || src_u > 1.05f || src_v < -0.05f || src_v > 1.05f)
@@ -156,16 +179,103 @@ bool fisheye_raw_pixel_to_view_uv(const fisheye_cam_t *cam,
         rz = cosf(inc);
     }
 
-    float vx, vy, vz;
-    camera_to_view_ray(view, rx, ry, rz, &vx, &vy, &vz);
-    if (vz <= 1e-5f) return false;
+    if (ray_x) *ray_x = rx;
+    if (ray_y) *ray_y = ry;
+    if (ray_z) *ray_z = rz;
+    return true;
+}
 
-    float theta = atan2f(vx, vz);
-    float phi = atan2f(vy * cosf(theta), vz);
-    float fov_h = view->fov_h_deg * (float)(M_PI / 180.0);
-    float fov_v = fov_h * (float)view->out_h / (float)view->out_w;
-    *out_u = theta / fov_h + 0.5f;
-    *out_v = phi / fov_v + 0.5f;
-    return (*out_u >= -0.05f && *out_u <= 1.05f &&
-            *out_v >= -0.05f && *out_v <= 1.05f);
+float fisheye_estimate_distance_from_bbox_height(const fisheye_cam_t *cam,
+                                                 const fisheye_view_t *view,
+                                                 float raw_x, float raw_y,
+                                                 float raw_w, float raw_h,
+                                                 float person_height_m)
+{
+    float tx, ty, tz, bx, by, bz;
+    float cx = raw_x + raw_w * 0.5f;
+    if (!cam || !view || raw_h <= 2.0f || person_height_m <= 0.2f)
+        return 0.0f;
+    if (!fisheye_raw_pixel_to_camera_ray(cam, view, cx, raw_y, &tx, &ty, &tz))
+        return 0.0f;
+    if (!fisheye_raw_pixel_to_camera_ray(cam, view, cx, raw_y + raw_h, &bx, &by, &bz))
+        return 0.0f;
+
+    float dot = tx * bx + ty * by + tz * bz;
+    if (dot < -1.0f) dot = -1.0f;
+    if (dot > 1.0f) dot = 1.0f;
+    float angle = acosf(dot);
+    if (angle < 0.001f)
+        return 0.0f;
+
+    return person_height_m / (2.0f * tanf(angle * 0.5f));
+}
+
+static float clamp01(float x)
+{
+    if (x < 0.0f) return 0.0f;
+    if (x > 1.0f) return 1.0f;
+    return x;
+}
+
+bool fisheye_project_bbox_to_view(const fisheye_cam_t *cam,
+                                  const fisheye_view_t *view,
+                                  float raw_x, float raw_y,
+                                  float raw_w, float raw_h,
+                                  float min_visible_fraction,
+                                  float *out_u0, float *out_v0,
+                                  float *out_u1, float *out_v1,
+                                  float *visible_fraction)
+{
+    const int steps = 12;
+    int total = 0;
+    int visible = 0;
+    float min_u = 1.0f, min_v = 1.0f, max_u = 0.0f, max_v = 0.0f;
+
+    if (!cam || !view || raw_w <= 1.0f || raw_h <= 1.0f)
+        return false;
+
+    for (int edge = 0; edge < 4; edge++) {
+        for (int s = 0; s <= steps; s++) {
+            float t = (float)s / (float)steps;
+            float px, py;
+            float u, v;
+            total++;
+
+            if (edge == 0) {
+                px = raw_x + raw_w * t; py = raw_y;
+            } else if (edge == 1) {
+                px = raw_x + raw_w; py = raw_y + raw_h * t;
+            } else if (edge == 2) {
+                px = raw_x + raw_w * (1.0f - t); py = raw_y + raw_h;
+            } else {
+                px = raw_x; py = raw_y + raw_h * (1.0f - t);
+            }
+
+            if (!fisheye_raw_pixel_to_view_uv(cam, view, px, py, &u, &v))
+                continue;
+            if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)
+                continue;
+
+            u = clamp01(u);
+            v = clamp01(v);
+            if (u < min_u) min_u = u;
+            if (u > max_u) max_u = u;
+            if (v < min_v) min_v = v;
+            if (v > max_v) max_v = v;
+            visible++;
+        }
+    }
+
+    float frac = total > 0 ? (float)visible / (float)total : 0.0f;
+    if (visible_fraction) *visible_fraction = frac;
+    if (visible < 4 || frac < min_visible_fraction)
+        return false;
+    if ((max_u - min_u) < 0.006f || (max_v - min_v) < 0.006f)
+        return false;
+
+    if (out_u0) *out_u0 = min_u;
+    if (out_v0) *out_v0 = min_v;
+    if (out_u1) *out_u1 = max_u;
+    if (out_v1) *out_v1 = max_v;
+    return true;
 }

@@ -28,4 +28,24 @@ bool fisheye_raw_pixel_to_view_uv(const fisheye_cam_t *cam,
                                   float raw_x, float raw_y,
                                   float *out_u, float *out_v);
 
+bool fisheye_raw_pixel_to_camera_ray(const fisheye_cam_t *cam,
+                                     const fisheye_view_t *view,
+                                     float raw_x, float raw_y,
+                                     float *ray_x, float *ray_y, float *ray_z);
+
+float fisheye_estimate_distance_from_bbox_height(const fisheye_cam_t *cam,
+                                                 const fisheye_view_t *view,
+                                                 float raw_x, float raw_y,
+                                                 float raw_w, float raw_h,
+                                                 float person_height_m);
+
+bool fisheye_project_bbox_to_view(const fisheye_cam_t *cam,
+                                  const fisheye_view_t *view,
+                                  float raw_x, float raw_y,
+                                  float raw_w, float raw_h,
+                                  float min_visible_fraction,
+                                  float *out_u0, float *out_v0,
+                                  float *out_u1, float *out_v1,
+                                  float *visible_fraction);
+
 #endif

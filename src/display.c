@@ -1045,6 +1045,27 @@ static bool fisheye_raw_to_output_uv(display_t *d, int cam,
                                         raw_x, raw_y, out_u, out_v);
 }
 
+static bool security_bbox_to_view_uv(display_t *d, int cam, const detection_t *dt,
+                                     float *u0, float *v0, float *u1, float *v1,
+                                     float *visible_fraction)
+{
+    if (cam < 0 || cam >= 4 || !dt) return false;
+    fisheye_view_t view = {
+        .fov_h_deg = d->fisheye_fov[cam],
+        .yaw_deg = d->fisheye_yaw[cam],
+        .pitch_deg = d->fisheye_pitch[cam],
+        .out_w = d->fisheye_out_w[cam] > 0 ? d->fisheye_out_w[cam] : 960,
+        .out_h = d->fisheye_out_h[cam] > 0 ? d->fisheye_out_h[cam] : 540,
+        .rotate_deg = d->fisheye_rot[cam],
+        .flip_x = d->fisheye_flipx[cam],
+        .flip_y = d->fisheye_flipy[cam],
+    };
+    return fisheye_project_bbox_to_view(&g_fisheye_cams[cam], &view,
+                                        dt->x, dt->y, dt->w, dt->h,
+                                        0.28f, u0, v0, u1, v1,
+                                        visible_fraction);
+}
+
 static void draw_fisheye_detections(display_t *d)
 {
     pthread_mutex_lock(&d->det_lock);
@@ -1149,6 +1170,73 @@ static void draw_osd_line(display_t *d, float x0, float y0, float x1, float y1,
     glDisableVertexAttribArray(d->osd_pos);
 }
 
+static void draw_segment_digit(display_t *d, int digit,
+                               float x, float y, float s,
+                               float r, float g, float b, float a)
+{
+    static const unsigned char segs[10] = {
+        0x3f, 0x06, 0x5b, 0x4f, 0x66,
+        0x6d, 0x7d, 0x07, 0x7f, 0x6f
+    };
+    if (digit < 0 || digit > 9) return;
+    unsigned char m = segs[digit];
+    float w = s * 0.44f;
+    float h = s * 0.72f;
+    float mid = y + h * 0.50f;
+    float x0 = x, x1 = x + w;
+    float y0 = y, y1 = y + h;
+    float ym = mid;
+
+    if (m & 0x01) draw_osd_line(d, x0, y1, x1, y1, r,g,b,a);
+    if (m & 0x02) draw_osd_line(d, x1, ym, x1, y1, r,g,b,a);
+    if (m & 0x04) draw_osd_line(d, x1, y0, x1, ym, r,g,b,a);
+    if (m & 0x08) draw_osd_line(d, x0, y0, x1, y0, r,g,b,a);
+    if (m & 0x10) draw_osd_line(d, x0, y0, x0, ym, r,g,b,a);
+    if (m & 0x20) draw_osd_line(d, x0, ym, x0, y1, r,g,b,a);
+    if (m & 0x40) draw_osd_line(d, x0, ym, x1, ym, r,g,b,a);
+}
+
+static void draw_distance_label(display_t *d, float x, float y, float dist_m,
+                                float r, float g, float b)
+{
+    if (dist_m <= 0.0f || dist_m > 99.0f) return;
+
+    int scaled = (int)(dist_m * 10.0f + 0.5f);
+    int tens = scaled / 100;
+    int ones = (scaled / 10) % 10;
+    int dec = scaled % 10;
+    float s = 0.032f;
+    float gap = 0.006f;
+    float char_w = s * 0.44f;
+    float box_w = (tens > 0 ? char_w + gap : 0.0f) + char_w + gap * 2.0f + char_w + char_w;
+    float box_h = s * 0.88f;
+
+    if (x + box_w > 0.98f) x = 0.98f - box_w;
+    if (x < -0.98f) x = -0.98f;
+    if (y + box_h > 0.98f) y = 0.98f - box_h;
+    if (y < -0.98f) y = -0.98f;
+
+    draw_filled_rect(d, x - 0.006f, y - 0.004f,
+                     x + box_w + 0.006f, y + box_h + 0.002f,
+                     0.0f, 0.0f, 0.0f, 0.50f);
+
+    float cx = x;
+    if (tens > 0) {
+        draw_segment_digit(d, tens, cx, y, s, r,g,b,1.0f);
+        cx += char_w + gap;
+    }
+    draw_segment_digit(d, ones, cx, y, s, r,g,b,1.0f);
+    cx += char_w + gap * 0.7f;
+    draw_filled_rect(d, cx, y + 0.005f, cx + 0.006f, y + 0.011f, r,g,b,1.0f);
+    cx += gap;
+    draw_segment_digit(d, dec, cx, y, s, r,g,b,1.0f);
+    cx += char_w + gap;
+    draw_osd_line(d, cx, y, cx, y + s * 0.50f, r,g,b,1.0f);
+    draw_osd_line(d, cx, y + s * 0.50f, cx + s * 0.16f, y + s * 0.28f, r,g,b,1.0f);
+    draw_osd_line(d, cx + s * 0.16f, y + s * 0.28f, cx + s * 0.32f, y + s * 0.50f, r,g,b,1.0f);
+    draw_osd_line(d, cx + s * 0.32f, y, cx + s * 0.32f, y + s * 0.50f, r,g,b,1.0f);
+}
+
 static void draw_rear_guide_lines(display_t *d)
 {
     glUseProgram(d->osd_prog);
@@ -1204,11 +1292,22 @@ static float security_estimate_distance_m(display_t *d, int cam, const detection
     if (!d || !dt || cam < 0 || cam >= 4 || dt->h <= 2)
         return 0.0f;
 
-    float focal = g_fisheye_cams[cam].focal;
-    if (focal <= 1.0f) focal = 535.0f;
+    fisheye_view_t view = {
+        .fov_h_deg = d->fisheye_fov[cam],
+        .yaw_deg = d->fisheye_yaw[cam],
+        .pitch_deg = d->fisheye_pitch[cam],
+        .out_w = d->fisheye_out_w[cam] > 0 ? d->fisheye_out_w[cam] : 960,
+        .out_h = d->fisheye_out_h[cam] > 0 ? d->fisheye_out_h[cam] : 540,
+        .rotate_deg = d->fisheye_rot[cam],
+        .flip_x = d->fisheye_flipx[cam],
+        .flip_y = d->fisheye_flipy[cam],
+    };
+    float dist = fisheye_estimate_distance_from_bbox_height(&g_fisheye_cams[cam], &view,
+                                                            dt->x, dt->y, dt->w, dt->h,
+                                                            d->security_person_height_m);
+    if (dist > 0.0f) return dist;
 
-    /* Temporary product estimate: human-height monocular distance.
-     * Final A-route will replace this with foot-point ground-plane projection. */
+    float focal = g_fisheye_cams[cam].focal > 1.0f ? g_fisheye_cams[cam].focal : 535.0f;
     return d->security_person_height_m * focal / (float)dt->h;
 }
 
@@ -1234,39 +1333,16 @@ static void draw_security_detections_for_cam(display_t *d, int cam,
         detection_t *dt = &d->dets[cam][i];
         if (dt->class_id != 0) continue;
 
+        float min_u, min_v, max_u, max_v, visible_fraction = 0.0f;
+        if (!security_bbox_to_view_uv(d, cam, dt,
+                                      &min_u, &min_v, &max_u, &max_v,
+                                      &visible_fraction))
+            continue;
+
         float dist_m = security_estimate_distance_m(d, cam, dt);
         if (dist_m > 0.0f && (*nearest_m <= 0.0f || dist_m < *nearest_m))
             *nearest_m = dist_m;
         (*person_count)++;
-
-        float min_u = 1.0f, min_v = 1.0f, max_u = 0.0f, max_v = 0.0f;
-        bool ok = false;
-        const int steps = 12;
-        for (int edge = 0; edge < 4; edge++) {
-            for (int s = 0; s <= steps; s++) {
-                float t = (float)s / (float)steps;
-                float px, py;
-                if (edge == 0) {
-                    px = dt->x + dt->w * t; py = dt->y;
-                } else if (edge == 1) {
-                    px = dt->x + dt->w; py = dt->y + dt->h * t;
-                } else if (edge == 2) {
-                    px = dt->x + dt->w * (1.0f - t); py = dt->y + dt->h;
-                } else {
-                    px = dt->x; py = dt->y + dt->h * (1.0f - t);
-                }
-
-                float u, v;
-                if (fisheye_raw_to_output_uv(d, cam, px, py, &u, &v)) {
-                    if (u < min_u) min_u = u;
-                    if (u > max_u) max_u = u;
-                    if (v < min_v) min_v = v;
-                    if (v > max_v) max_v = v;
-                    ok = true;
-                }
-            }
-        }
-        if (!ok) continue;
 
         float r, g, b;
         security_risk_color(d, dist_m, &r, &g, &b);
@@ -1276,56 +1352,7 @@ static void draw_security_detections_for_cam(display_t *d, int cam,
         float by0 = y1 - max_v * (y1 - y0);
 
         draw_outline_rect(d, bx0, by0, bx1, by1, r, g, b, 1.0f);
-
-        float foot_u = 0.5f * (min_u + max_u);
-        float foot_x = x0 + foot_u * (x1 - x0);
-        float foot_y = by0;
-        draw_osd_line(d, foot_x - 0.012f, foot_y, foot_x + 0.012f, foot_y, r, g, b, 1.0f);
-        draw_osd_line(d, foot_x, foot_y - 0.012f, foot_x, foot_y + 0.012f, r, g, b, 1.0f);
-    }
-}
-
-static void draw_security_status(display_t *d, int cam,
-                                 float x0, float y0, float x1, float y1,
-                                 int person_count, float nearest_m)
-{
-    float rr, rg, rb;
-    security_risk_color(d, nearest_m, &rr, &rg, &rb);
-
-    (void)y0;
-    float top = y1;
-    float line_h = 0.010f;
-    draw_filled_rect(d, x0, top - line_h, x1, top, 0.005f, 0.006f, 0.008f, 0.86f);
-    draw_filled_rect(d, x0, top - line_h, x0 + (x1 - x0) * 0.22f,
-                     top, rr, rg, rb, 1.0f);
-
-    float badge_x0 = x0 + 0.018f;
-    float badge_y1 = top - 0.020f;
-    float badge_y0 = badge_y1 - 0.055f;
-    float badge_x1 = badge_x0 + 0.118f;
-    draw_filled_rect(d, badge_x0, badge_y0, badge_x1, badge_y1,
-                     0.010f, 0.012f, 0.016f, 0.78f);
-    draw_outline_rect(d, badge_x0, badge_y0, badge_x1, badge_y1,
-                      0.12f, 0.15f, 0.20f, 0.92f);
-
-    float cy = (badge_y0 + badge_y1) * 0.5f;
-    float mark_x = badge_x0 + 0.020f + cam * 0.019f;
-    draw_filled_rect(d, mark_x, cy - 0.010f, mark_x + 0.012f, cy + 0.010f,
-                     0.66f, 0.78f, 0.90f, 1.0f);
-
-    for (int i = 0; i < person_count && i < 4; i++) {
-        float dot_x = badge_x1 + 0.018f + i * 0.022f;
-        float dot_y = cy;
-        draw_filled_rect(d, dot_x - 0.006f, dot_y - 0.006f,
-                         dot_x + 0.006f, dot_y + 0.006f,
-                         rr, rg, rb, 0.94f);
-    }
-
-    if (nearest_m > 0.0f) {
-        float tick_w = (nearest_m <= d->security_warn_near_m) ? 0.050f :
-                       (nearest_m <= d->security_warn_mid_m) ? 0.034f : 0.022f;
-        draw_filled_rect(d, x1 - 0.030f - tick_w, top - 0.032f,
-                         x1 - 0.030f, top - 0.020f, rr, rg, rb, 0.96f);
+        draw_distance_label(d, bx0 + 0.010f, by1 - 0.040f, dist_m, r, g, b);
     }
 }
 
@@ -1346,15 +1373,20 @@ static void draw_security_mode(display_t *d)
 
     glUseProgram(d->osd_prog);
     pthread_mutex_lock(&d->det_lock);
+    static int dist_log_seq = 0;
     for (int cam = 0; cam < d->n_cams && cam < 4; cam++) {
         float x0, y0, x1, y1, sy0, sy1;
         int persons = 0;
         float nearest = 0.0f;
         security_tile_image_rect(d, cam, &x0, &y0, &x1, &y1, &sy0, &sy1);
         draw_security_detections_for_cam(d, cam, x0, y0, x1, y1, &persons, &nearest);
-        draw_security_status(d, cam, x0, sy0, x1, sy1, persons, nearest);
-        draw_outline_rect(d, x0, y0, x1, y1, 0.08f, 0.10f, 0.13f, 1.0f);
+        if ((dist_log_seq % 90) == 0 && persons > 0 && nearest > 0.0f)
+            printf("[DIST] cam%d visible_person=%d nearest=%.2fm method=height%.2fm\n",
+                   cam, persons, nearest, d->security_person_height_m);
+        (void)sy0; (void)sy1; (void)persons; (void)nearest;
+        draw_outline_rect(d, x0, y0, x1, y1, 0.04f, 0.05f, 0.06f, 1.0f);
     }
+    dist_log_seq++;
     pthread_mutex_unlock(&d->det_lock);
 }
 

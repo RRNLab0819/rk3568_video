@@ -45,6 +45,25 @@ int main(void)
     assert(closef(u, 0.5f));
     assert(closef(v, 0.5f));
 
+    float dist = fisheye_estimate_distance_from_bbox_height(&cam, &view,
+                                                           910.0f, 450.0f,
+                                                           100.0f, 180.0f,
+                                                           1.70f);
+    assert(dist > 4.0f && dist < 8.0f);
+
+    float u0, v0, u1, v1, vis;
+    assert(fisheye_project_bbox_to_view(&cam, &view,
+                                        900.0f, 480.0f, 140.0f, 160.0f,
+                                        0.25f, &u0, &v0, &u1, &v1, &vis));
+    assert(u0 >= 0.0f && u1 <= 1.0f);
+    assert(v0 >= 0.0f && v1 <= 1.0f);
+    assert(u1 > u0);
+    assert(v1 > v0);
+
+    assert(!fisheye_project_bbox_to_view(&cam, &view,
+                                         1880.0f, 20.0f, 60.0f, 80.0f,
+                                         0.50f, &u0, &v0, &u1, &v1, &vis));
+
     view.yaw_deg = 25.0f;
     assert(fisheye_view_to_raw_uv(&cam, &view, 0.5f, 0.5f, &u, &v));
     assert(u > 0.5f);
