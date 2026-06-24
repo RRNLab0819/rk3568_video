@@ -55,6 +55,7 @@ int  fisheye_mesh_build_ex(fisheye_mesh_t *mesh,
                            float tile_w,  float tile_h,
                            int out_w, int out_h,
                            float fov_h,
+                           float yaw_deg, float pitch_deg,
                            int rotate_deg, bool flip_x, bool flip_y,
                            fisheye_uv_stats_t *stats);
 
@@ -65,7 +66,8 @@ static inline int fisheye_mesh_build(fisheye_mesh_t *mesh,
                                      int ow, int oh, float fov)
 {
     return fisheye_mesh_build_ex(mesh, cam, x0, y0, w, h,
-                                 ow, oh, fov, 0, false, false, NULL);
+                                 ow, oh, fov, 0.0f, 0.0f,
+                                 0, false, false, NULL);
 }
 
 void fisheye_mesh_destroy(fisheye_mesh_t *mesh);

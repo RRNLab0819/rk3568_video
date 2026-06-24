@@ -28,7 +28,7 @@ LIBS    += -lopencv_core -lopencv_imgproc -lopencv_imgcodecs
 LIBS    += -lstdc++
 
 SRCDIR   := src
-CSRCS    := capture.c display.c encoder.c fisheye_mesh.c main.c pipeline.c xdg-shell-client.c
+CSRCS    := capture.c display.c encoder.c fisheye_mesh.c fisheye_project.c main.c pipeline.c xdg-shell-client.c
 CXXSRCS  := inference.cc postprocess.cc
 OBJS     := $(patsubst %.c, build/%.o, $(CSRCS)) $(patsubst %.cc, build/%.o, $(CXXSRCS))
 TARGET   := rk3568_camera

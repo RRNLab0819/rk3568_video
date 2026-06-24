@@ -1,5 +1,6 @@
 /* src/fisheye_mesh.c */
 #include "fisheye_mesh.h"
+#include "fisheye_project.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -385,6 +386,7 @@ int fisheye_mesh_build_ex(fisheye_mesh_t *mesh,
                           float tile_w,  float tile_h,
                           int out_w, int out_h,
                           float fov_h,
+                          float yaw_deg, float pitch_deg,
                           int rotate_deg, bool flip_x, bool flip_y,
                           fisheye_uv_stats_t *stats)
 {
@@ -401,9 +403,16 @@ int fisheye_mesh_build_ex(fisheye_mesh_t *mesh,
         return -1;
     }
 
-    float fov_v = fov_h * (float)out_h / (float)out_w;
-    float fov_h_rad = fov_h * (float)(M_PI / 180.0);
-    float fov_v_rad = fov_v * (float)(M_PI / 180.0);
+    fisheye_view_t view = {
+        .fov_h_deg = fov_h,
+        .yaw_deg = yaw_deg,
+        .pitch_deg = pitch_deg,
+        .out_w = out_w,
+        .out_h = out_h,
+        .rotate_deg = rotate_deg,
+        .flip_x = flip_x,
+        .flip_y = flip_y,
+    };
 
     int valid = 0;
     int oob_top = 0, oob_bot = 0, oob_left = 0, oob_right = 0;
@@ -420,38 +429,8 @@ int fisheye_mesh_build_ex(fisheye_mesh_t *mesh,
             pos[vi * 2 + 0] = tile_x0 + u * tile_w;
             pos[vi * 2 + 1] = tile_y0 + v * tile_h;
 
-            /* Ray angles from output pixel (rectilinear / pinhole model) */
-            float theta = (u - 0.5f) * fov_h_rad;
-            float phi   = (v - 0.5f) * fov_v_rad;
-            float cos_theta = cosf(theta);
-
-            /* Pinhole projection to ideal sensor coords */
-            float dx = cam->focal * tanf(theta);
-            float dy = cam->focal * tanf(phi) / cos_theta;
-
-            /* Incident angle from optical axis */
-            float r_ideal = sqrtf(dx * dx + dy * dy);
-            float inc_angle = atan2f(r_ideal, cam->focal);
-
-            /* Kannala-Brandt distorted radius */
-            float r_real = lens_6028_radius(inc_angle, cam);
-
-            /* Source pixel in the fisheye image */
-            float sx, sy;
-            if (r_ideal > 1e-6f) {
-                sx = cam->cx + dx * (r_real / r_ideal);
-                sy = cam->cy + dy * (r_real / r_ideal);
-            } else {
-                sx = cam->cx;
-                sy = cam->cy;
-            }
-
-            /* Convert to normalized UV */
-            float uv_u = sx / (float)cam->src_w;
-            float uv_v = sy / (float)cam->src_h;
-
-            /* Apply rotation and flip */
-            apply_rotate_flip(&uv_u, &uv_v, rotate_deg, flip_x, flip_y);
+            float uv_u = 0.5f, uv_v = 0.5f;
+            fisheye_view_to_raw_uv(cam, &view, u, v, &uv_u, &uv_v);
 
             tex[vi * 2 + 0] = uv_u;
             tex[vi * 2 + 1] = uv_v;
@@ -526,11 +505,12 @@ int fisheye_mesh_build_ex(fisheye_mesh_t *mesh,
         stats->v_min = v_min; stats->v_max = v_max;
     }
 
-    printf("[mesh] cam: cx=%.1f cy=%.1f focal=%.1f fov=%.0f rot=%d flip=%d,%d  "
+    printf("[mesh] cam: cx=%.1f cy=%.1f focal=%.1f fov=%.0f yaw=%.0f pitch=%.0f rot=%d flip=%d,%d  "
            "verts=%d valid=%.1f%% oob=%.1f%% "
            "UV:[%.2f-%.2f,%.2f-%.2f] "
            "edges: T=%.1f%% B=%.1f%% L=%.1f%% R=%.1f%% near=%.1f%%\n",
-           cam->cx, cam->cy, cam->focal, fov_h, rotate_deg, flip_x, flip_y,
+           cam->cx, cam->cy, cam->focal, fov_h, yaw_deg, pitch_deg,
+           rotate_deg, flip_x, flip_y,
            nv, stats ? stats->valid_pct : (float)valid * 100.0f / nv,
            stats ? stats->oob_pct : (float)(nv - valid) * 100.0f / nv,
            u_min, u_max, v_min, v_max,

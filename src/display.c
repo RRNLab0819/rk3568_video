@@ -10,6 +10,7 @@
 #include "shader_yuv.h"
 #include "xdg-shell-client.h"
 #include "fisheye_mesh.h"
+#include "fisheye_project.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -108,6 +109,10 @@ struct display_s {
     GLuint      grid_ibo[4];
     int         grid_nidx[4];
     float       fisheye_fov[4];
+    float       fisheye_yaw[4];
+    float       fisheye_pitch[4];
+    int         fisheye_out_w[4];
+    int         fisheye_out_h[4];
     int         fisheye_rot[4];
     bool        fisheye_flipx[4];
     bool        fisheye_flipy[4];
@@ -688,6 +693,8 @@ display_t *disp_open(int width, int height, int n_cameras)
 
     /* ---- Per-camera params: FOV, rotate, flip (env overrides) ---- */
     float fov_cam[4]    = { 150.0f, 150.0f, 150.0f, 150.0f };
+    float yaw_cam[4]    = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float pitch_cam[4]  = { 0.0f, 0.0f, 0.0f, 0.0f };
     int   rot_cam[4]    = { 0, 0, 0, 0 };
     bool  flipx_cam[4]  = { false, false, false, false };
     bool  flipy_cam[4]  = { false, false, false, false };
@@ -698,6 +705,20 @@ display_t *disp_open(int width, int height, int n_cameras)
         char *tok = strtok(buf, ",");
         for (int j = 0; j < 4 && tok; j++, tok = strtok(NULL, ","))
             fov_cam[j] = atof(tok);
+    }
+    const char *syaw = getenv("SECURITY_VIEW_YAW");
+    if (syaw) {
+        char buf[96]; strncpy(buf, syaw, 95); buf[95] = 0;
+        char *tok = strtok(buf, ",");
+        for (int j = 0; j < 4 && tok; j++, tok = strtok(NULL, ","))
+            yaw_cam[j] = atof(tok);
+    }
+    const char *spitch = getenv("SECURITY_VIEW_PITCH");
+    if (spitch) {
+        char buf[96]; strncpy(buf, spitch, 95); buf[95] = 0;
+        char *tok = strtok(buf, ",");
+        for (int j = 0; j < 4 && tok; j++, tok = strtok(NULL, ","))
+            pitch_cam[j] = atof(tok);
     }
     const char *fr = getenv("FISHEYE_ROTATE");
     if (fr) {
@@ -772,10 +793,15 @@ display_t *disp_open(int width, int height, int n_cameras)
                 th -= pad_y * 2.0f;
             }
 
-            printf("  cam%d: fov=%.0f rot=%d flip=%d,%d rect=[%.2f,%.2f,%.2f,%.2f]\n",
-                   i, fov_cam[i], rot_cam[i], flipx_cam[i], flipy_cam[i],
+            printf("  cam%d: fov=%.0f yaw=%.0f pitch=%.0f rot=%d flip=%d,%d rect=[%.2f,%.2f,%.2f,%.2f]\n",
+                   i, fov_cam[i], yaw_cam[i], pitch_cam[i],
+                   rot_cam[i], flipx_cam[i], flipy_cam[i],
                    x0, y0, tw, th);
             d->fisheye_fov[i] = fov_cam[i];
+            d->fisheye_yaw[i] = yaw_cam[i];
+            d->fisheye_pitch[i] = pitch_cam[i];
+            d->fisheye_out_w[i] = (debug_cam >= 0) ? 1920 : 960;
+            d->fisheye_out_h[i] = (debug_cam >= 0) ? 1080 : 540;
             d->fisheye_rot[i] = rot_cam[i];
             d->fisheye_flipx[i] = flipx_cam[i];
             d->fisheye_flipy[i] = flipy_cam[i];
@@ -786,6 +812,7 @@ display_t *disp_open(int width, int height, int n_cameras)
                                       (debug_cam >= 0) ? 1920 : 960,
                                       (debug_cam >= 0) ? 1080 : 540,
                                       fov_cam[i],
+                                      yaw_cam[i], pitch_cam[i],
                                       rot_cam[i], flipx_cam[i], flipy_cam[i],
                                       &uv_stats[i]) == 0) {
                 /* Dump UV debug PPM (before debug_cam skip, so all cams get PPM) */
@@ -999,81 +1026,23 @@ static void draw_fisheye_grid_mode(display_t *d)
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
-static void inverse_rotate_flip_uv_local(float *u, float *v,
-                                         int rotate_deg, bool flip_x, bool flip_y)
-{
-    float ru = *u - 0.5f;
-    float rv = *v - 0.5f;
-    if (flip_x) ru = -ru;
-    if (flip_y) rv = -rv;
-
-    float tu, tv;
-    switch (rotate_deg) {
-    case 90:  tu =  rv; tv = -ru; break;
-    case 180: tu = -ru; tv = -rv; break;
-    case 270: tu = -rv; tv =  ru; break;
-    default:  tu =  ru; tv =  rv; break;
-    }
-    *u = tu + 0.5f;
-    *v = tv + 0.5f;
-}
-
 static bool fisheye_raw_to_output_uv(display_t *d, int cam,
                                      float raw_x, float raw_y,
                                      float *out_u, float *out_v)
 {
-    const fisheye_cam_t *fc = &g_fisheye_cams[cam];
-    float src_u = raw_x / (float)fc->src_w;
-    float src_v = raw_y / (float)fc->src_h;
-
-    if (src_u < -0.05f || src_u > 1.05f || src_v < -0.05f || src_v > 1.05f)
-        return false;
-
-    inverse_rotate_flip_uv_local(&src_u, &src_v, d->fisheye_rot[cam],
-                                 d->fisheye_flipx[cam], d->fisheye_flipy[cam]);
-
-    float sx = src_u * (float)fc->src_w;
-    float sy = src_v * (float)fc->src_h;
-    float dx = sx - fc->cx;
-    float dy = sy - fc->cy;
-    float r_real = sqrtf(dx * dx + dy * dy);
-
-    float inc = 0.0f;
-    if (r_real > 1e-5f) {
-        inc = r_real / fc->focal;
-        for (int iter = 0; iter < 8; iter++) {
-            float t2 = inc * inc;
-            float t4 = t2 * t2;
-            float t6 = t4 * t2;
-            float t8 = t4 * t4;
-            float poly = 1.0f + fc->k[0]*t2 + fc->k[1]*t4 +
-                         fc->k[2]*t6 + fc->k[3]*t8;
-            float f = fc->focal * inc * poly - r_real;
-            float deriv = fc->focal * (1.0f + 3.0f*fc->k[0]*t2 +
-                          5.0f*fc->k[1]*t4 + 7.0f*fc->k[2]*t6 +
-                          9.0f*fc->k[3]*t8);
-            if (fabsf(deriv) < 1e-6f) break;
-            inc -= f / deriv;
-            if (inc < 0.0f) inc = 0.0f;
-        }
-    }
-
-    float r_ideal = fc->focal * tanf(inc);
-    float ix = 0.0f, iy = 0.0f;
-    if (r_real > 1e-5f) {
-        ix = dx * (r_ideal / r_real);
-        iy = dy * (r_ideal / r_real);
-    }
-
-    float theta = atan2f(ix, fc->focal);
-    float phi = atan2f(iy * cosf(theta), fc->focal);
-    float fov_h_rad = d->fisheye_fov[cam] * (float)(M_PI / 180.0);
-    float fov_v_rad = fov_h_rad * 1080.0f / 1920.0f;
-
-    *out_u = theta / fov_h_rad + 0.5f;
-    *out_v = phi / fov_v_rad + 0.5f;
-    return (*out_u >= -0.05f && *out_u <= 1.05f &&
-            *out_v >= -0.05f && *out_v <= 1.05f);
+    if (cam < 0 || cam >= 4) return false;
+    fisheye_view_t view = {
+        .fov_h_deg = d->fisheye_fov[cam],
+        .yaw_deg = d->fisheye_yaw[cam],
+        .pitch_deg = d->fisheye_pitch[cam],
+        .out_w = d->fisheye_out_w[cam] > 0 ? d->fisheye_out_w[cam] : 960,
+        .out_h = d->fisheye_out_h[cam] > 0 ? d->fisheye_out_h[cam] : 540,
+        .rotate_deg = d->fisheye_rot[cam],
+        .flip_x = d->fisheye_flipx[cam],
+        .flip_y = d->fisheye_flipy[cam],
+    };
+    return fisheye_raw_pixel_to_view_uv(&g_fisheye_cams[cam], &view,
+                                        raw_x, raw_y, out_u, out_v);
 }
 
 static void draw_fisheye_detections(display_t *d)
