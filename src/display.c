@@ -34,6 +34,7 @@ typedef enum {
     DISPLAY_MODE_GRID,           /* original 2x2 quad */
     DISPLAY_MODE_FISHEYE_GRID,   /* 2x2 fisheye mesh per tile */
     DISPLAY_MODE_OEM_AVM,        /* opt-in OEM-style AVM UI */
+    DISPLAY_MODE_SECURITY,       /* calibrated fisheye security monitor */
 } display_mode_t;
 
 typedef enum {
@@ -92,6 +93,9 @@ struct display_s {
     oem_avm_view_t          oem_view;
     int                     oem_main_cam;
     int                     oem_cam_map[4];
+    float                   security_person_height_m;
+    float                   security_warn_near_m;
+    float                   security_warn_mid_m;
 
     /* Mesh shader (shared by FISHEYE_GRID and AVM modes) */
     GLuint      mesh_prog;
@@ -651,11 +655,14 @@ display_t *disp_open(int width, int height, int n_cameras)
     glDeleteShader(vs);
     glDeleteShader(fs);
 
-    /* ---- Display mode selection (OEM_AVM_MODE > FISHEYE_MODE > grid) ---- */
+    /* ---- Display mode selection (SECURITY_MODE > OEM_AVM_MODE > FISHEYE_MODE > grid) ---- */
     {
+        const char *sec = getenv("SECURITY_MODE");
         const char *oem = getenv("OEM_AVM_MODE");
         const char *fm  = getenv("FISHEYE_MODE");
-        if (oem && oem[0] == '1')
+        if (sec && sec[0] == '1')
+            d->mode = DISPLAY_MODE_SECURITY;
+        else if (oem && oem[0] == '1')
             d->mode = DISPLAY_MODE_OEM_AVM;
         else if (fm && fm[0] == '1')
             d->mode = DISPLAY_MODE_FISHEYE_GRID;
@@ -663,8 +670,8 @@ display_t *disp_open(int width, int height, int n_cameras)
             d->mode = DISPLAY_MODE_GRID;
     }
 
-    /* ---- Compile mesh shader for fisheye grid only ---- */
-    if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
+    /* ---- Compile mesh shader for calibrated fisheye views ---- */
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID || d->mode == DISPLAY_MODE_SECURITY) {
         d->mesh_prog = glCreateProgram();
         { GLuint v = compile_shader(GL_VERTEX_SHADER, vert_src);
           GLuint f = compile_shader(GL_FRAGMENT_SHADER, frag_src);
@@ -680,7 +687,7 @@ display_t *disp_open(int width, int height, int n_cameras)
     }
 
     /* ---- Per-camera params: FOV, rotate, flip (env overrides) ---- */
-    float fov_cam[4]    = { 124.0f, 155.0f, 161.0f, 170.0f };
+    float fov_cam[4]    = { 160.0f, 160.0f, 160.0f, 160.0f };
     int   rot_cam[4]    = { 0, 0, 0, 0 };
     bool  flipx_cam[4]  = { false, false, false, false };
     bool  flipy_cam[4]  = { false, false, false, false };
@@ -721,21 +728,34 @@ display_t *disp_open(int width, int height, int n_cameras)
         printf("[display] DEBUG: single camera %d fullscreen\n", debug_cam);
     }
 
-    if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID || d->mode == DISPLAY_MODE_SECURITY) {
         const char *calib_dir = getenv("FISHEYE_CALIB_DIR");
         if (calib_dir && calib_dir[0])
             fisheye_load_calibration_dir(calib_dir, d->n_cams);
     }
 
+    d->security_person_height_m = 1.70f;
+    d->security_warn_near_m = 1.50f;
+    d->security_warn_mid_m = 3.00f;
+    {
+        const char *ph = getenv("SECURITY_PERSON_HEIGHT_M");
+        const char *wn = getenv("SECURITY_WARN_NEAR_M");
+        const char *wm = getenv("SECURITY_WARN_MID_M");
+        if (ph && atof(ph) > 0.5f) d->security_person_height_m = atof(ph);
+        if (wn && atof(wn) > 0.1f) d->security_warn_near_m = atof(wn);
+        if (wm && atof(wm) > d->security_warn_near_m) d->security_warn_mid_m = atof(wm);
+    }
+
     /* ---- Build meshes ---- */
     fisheye_uv_stats_t uv_stats[4];
 
-    if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID || d->mode == DISPLAY_MODE_SECURITY) {
         int cols = (d->n_cams <= 2) ? d->n_cams : 2;
         int rows = (d->n_cams <= 2) ? 1 : 2;
         float qw = 2.0f / cols, qh = 2.0f / rows;
 
-        printf("[display] fisheye grid params:\n");
+        printf("[display] %s params:\n",
+               d->mode == DISPLAY_MODE_SECURITY ? "security fisheye" : "fisheye grid");
         for (int i = 0; i < d->n_cams; i++) {
             int col = (debug_cam >= 0) ? 0 : i % cols;
             int row = (debug_cam >= 0) ? 0 : i / cols;
@@ -743,6 +763,15 @@ display_t *disp_open(int width, int height, int n_cameras)
             float y0 =  1.0f - (row + 1) * ((debug_cam >= 0) ? 2.0f : qh);
             float tw = (debug_cam >= 0) ? 2.0f : qw;
             float th = (debug_cam >= 0) ? 2.0f : qh;
+            if (d->mode == DISPLAY_MODE_SECURITY && debug_cam < 0) {
+                float pad_x = 0.018f;
+                float pad_y = 0.018f;
+                float status_h = th * 0.105f;
+                x0 += pad_x;
+                y0 += pad_y;
+                tw -= pad_x * 2.0f;
+                th -= pad_y * 2.0f + status_h;
+            }
 
             printf("  cam%d: fov=%.0f rot=%d flip=%d,%d rect=[%.2f,%.2f,%.2f,%.2f]\n",
                    i, fov_cam[i], rot_cam[i], flipx_cam[i], flipy_cam[i],
@@ -774,7 +803,9 @@ display_t *disp_open(int width, int height, int n_cameras)
                 d->grid_nidx[i]    = m.num_indices;
             }
         }
-        printf("[display] fisheye grid mode ON (%d cameras)\n", d->n_cams);
+        printf("[display] %s mode ON (%d cameras)\n",
+               d->mode == DISPLAY_MODE_SECURITY ? "security" : "fisheye grid",
+               d->n_cams);
     }
 
     d->oem_view = OEM_AVM_SURROUND_MAIN;
@@ -806,6 +837,10 @@ display_t *disp_open(int width, int height, int n_cameras)
     }
     if (d->mode == DISPLAY_MODE_OEM_AVM)
         printf("[display] OEM AVM mode ON view=%d main_cam=%d\n", d->oem_view, d->oem_main_cam);
+    if (d->mode == DISPLAY_MODE_SECURITY)
+        printf("[display] security mode ON person_height=%.2fm warn=%.1f/%.1fm\n",
+               d->security_person_height_m,
+               d->security_warn_near_m, d->security_warn_mid_m);
 
     /* OSD program (flat color for detection boxes) */
     d->osd_prog = glCreateProgram();
@@ -1173,6 +1208,195 @@ static void draw_side_guide_lines(display_t *d, bool right_side)
                   0.95f, 0.20f, 0.20f, 1.0f);
 }
 
+static void security_tile_image_rect(display_t *d, int cam,
+                                     float *x0, float *y0, float *x1, float *y1,
+                                     float *status_y0, float *status_y1)
+{
+    int cols = (d->n_cams <= 2) ? d->n_cams : 2;
+    int rows = (d->n_cams <= 2) ? 1 : 2;
+    float qw = 2.0f / (float)cols;
+    float qh = 2.0f / (float)rows;
+    int col = cam % cols;
+    int row = cam / cols;
+    float tile_x0 = -1.0f + col * qw;
+    float tile_y0 =  1.0f - (row + 1) * qh;
+    float pad_x = 0.018f;
+    float pad_y = 0.018f;
+    float status_h = qh * 0.105f;
+
+    *x0 = tile_x0 + pad_x;
+    *x1 = tile_x0 + qw - pad_x;
+    *y0 = tile_y0 + pad_y;
+    *y1 = tile_y0 + qh - pad_y - status_h;
+    *status_y0 = *y1;
+    *status_y1 = tile_y0 + qh - pad_y;
+}
+
+static float security_estimate_distance_m(display_t *d, int cam, const detection_t *dt)
+{
+    if (!d || !dt || cam < 0 || cam >= 4 || dt->h <= 2)
+        return 0.0f;
+
+    float focal = g_fisheye_cams[cam].focal;
+    if (focal <= 1.0f) focal = 535.0f;
+
+    /* Temporary product estimate: human-height monocular distance.
+     * Final A-route will replace this with foot-point ground-plane projection. */
+    return d->security_person_height_m * focal / (float)dt->h;
+}
+
+static void security_risk_color(display_t *d, float distance_m,
+                                float *r, float *g, float *b)
+{
+    if (distance_m > 0.0f && distance_m <= d->security_warn_near_m) {
+        *r = 1.0f; *g = 0.12f; *b = 0.10f;
+    } else if (distance_m > 0.0f && distance_m <= d->security_warn_mid_m) {
+        *r = 1.0f; *g = 0.72f; *b = 0.12f;
+    } else {
+        *r = 0.10f; *g = 0.95f; *b = 0.42f;
+    }
+}
+
+static void draw_security_detections_for_cam(display_t *d, int cam,
+                                             float x0, float y0, float x1, float y1,
+                                             int *person_count, float *nearest_m)
+{
+    if (!d->has_frame[cam] || d->det_count[cam] <= 0) return;
+
+    for (int i = 0; i < d->det_count[cam]; i++) {
+        detection_t *dt = &d->dets[cam][i];
+        if (dt->class_id != 0) continue;
+
+        float dist_m = security_estimate_distance_m(d, cam, dt);
+        if (dist_m > 0.0f && (*nearest_m <= 0.0f || dist_m < *nearest_m))
+            *nearest_m = dist_m;
+        (*person_count)++;
+
+        float min_u = 1.0f, min_v = 1.0f, max_u = 0.0f, max_v = 0.0f;
+        bool ok = false;
+        const int steps = 12;
+        for (int edge = 0; edge < 4; edge++) {
+            for (int s = 0; s <= steps; s++) {
+                float t = (float)s / (float)steps;
+                float px, py;
+                if (edge == 0) {
+                    px = dt->x + dt->w * t; py = dt->y;
+                } else if (edge == 1) {
+                    px = dt->x + dt->w; py = dt->y + dt->h * t;
+                } else if (edge == 2) {
+                    px = dt->x + dt->w * (1.0f - t); py = dt->y + dt->h;
+                } else {
+                    px = dt->x; py = dt->y + dt->h * (1.0f - t);
+                }
+
+                float u, v;
+                if (fisheye_raw_to_output_uv(d, cam, px, py, &u, &v)) {
+                    if (u < min_u) min_u = u;
+                    if (u > max_u) max_u = u;
+                    if (v < min_v) min_v = v;
+                    if (v > max_v) max_v = v;
+                    ok = true;
+                }
+            }
+        }
+        if (!ok) continue;
+
+        float r, g, b;
+        security_risk_color(d, dist_m, &r, &g, &b);
+        float bx0 = x0 + min_u * (x1 - x0);
+        float bx1 = x0 + max_u * (x1 - x0);
+        float by1 = y1 - min_v * (y1 - y0);
+        float by0 = y1 - max_v * (y1 - y0);
+
+        draw_outline_rect(d, bx0, by0, bx1, by1, r, g, b, 1.0f);
+        draw_outline_rect(d, bx0 - 0.006f, by0 - 0.006f,
+                          bx1 + 0.006f, by1 + 0.006f, r, g, b, 0.45f);
+
+        float foot_u = 0.5f * (min_u + max_u);
+        float foot_x = x0 + foot_u * (x1 - x0);
+        float foot_y = by0;
+        draw_osd_line(d, foot_x - 0.018f, foot_y, foot_x + 0.018f, foot_y, r, g, b, 1.0f);
+        draw_osd_line(d, foot_x, foot_y - 0.018f, foot_x, foot_y + 0.018f, r, g, b, 1.0f);
+    }
+}
+
+static void draw_security_status(display_t *d, int cam,
+                                 float x0, float y0, float x1, float y1,
+                                 int person_count, float nearest_m)
+{
+    float rr, rg, rb;
+    security_risk_color(d, nearest_m, &rr, &rg, &rb);
+
+    draw_filled_rect(d, x0, y0, x1, y1, 0.012f, 0.014f, 0.018f, 0.96f);
+    draw_filled_rect(d, x0, y0, x0 + 0.018f, y1, rr, rg, rb, 1.0f);
+    draw_outline_rect(d, x0, y0, x1, y1, 0.16f, 0.18f, 0.22f, 1.0f);
+
+    float cx = x0 + 0.058f;
+    float cy = (y0 + y1) * 0.5f;
+    float s = (y1 - y0) * 0.26f;
+    draw_outline_rect(d, cx - s, cy - s, cx + s, cy + s, 0.70f, 0.82f, 0.94f, 1.0f);
+    draw_osd_line(d, cx - s * 0.55f, cy, cx + s * 0.55f, cy, 0.70f, 0.82f, 0.94f, 1.0f);
+    draw_osd_line(d, cx, cy - s * 0.55f, cx, cy + s * 0.55f, 0.70f, 0.82f, 0.94f, 1.0f);
+
+    float cam_mark_x = x0 + 0.112f + cam * 0.030f;
+    draw_filled_rect(d, cam_mark_x, cy - s * 0.28f,
+                     cam_mark_x + 0.018f, cy + s * 0.28f,
+                     0.70f, 0.82f, 0.94f, 1.0f);
+
+    float px = x0 + 0.280f;
+    for (int i = 0; i < person_count && i < 6; i++) {
+        float bx = px + i * 0.028f;
+        draw_filled_rect(d, bx, cy - s * 0.40f, bx + 0.012f, cy + s * 0.30f,
+                         rr, rg, rb, 1.0f);
+        draw_filled_rect(d, bx - 0.004f, cy + s * 0.34f, bx + 0.016f, cy + s * 0.56f,
+                         rr, rg, rb, 1.0f);
+    }
+
+    float meter_x0 = x1 - 0.260f;
+    float meter_x1 = x1 - 0.040f;
+    float meter_y0 = cy - s * 0.28f;
+    float meter_y1 = cy + s * 0.28f;
+    draw_outline_rect(d, meter_x0, meter_y0, meter_x1, meter_y1,
+                      0.30f, 0.34f, 0.40f, 1.0f);
+    float fill = 0.0f;
+    if (nearest_m > 0.0f) {
+        fill = 1.0f - fminf(nearest_m, 6.0f) / 6.0f;
+        if (fill < 0.06f) fill = 0.06f;
+    }
+    draw_filled_rect(d, meter_x0, meter_y0,
+                     meter_x0 + (meter_x1 - meter_x0) * fill, meter_y1,
+                     rr, rg, rb, 1.0f);
+}
+
+static void draw_security_mode(display_t *d)
+{
+    glClearColor(0.004f, 0.005f, 0.007f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(0, 0, d->w, d->h);
+
+    glUseProgram(d->mesh_prog);
+    for (int cam = 0; cam < d->n_cams; cam++) {
+        draw_mesh_tile(d, cam,
+                       d->grid_vbo_pos[cam], d->grid_vbo_tex[cam],
+                       d->grid_ibo[cam], d->grid_nidx[cam]);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+    glUseProgram(d->osd_prog);
+    pthread_mutex_lock(&d->det_lock);
+    for (int cam = 0; cam < d->n_cams && cam < 4; cam++) {
+        float x0, y0, x1, y1, sy0, sy1;
+        int persons = 0;
+        float nearest = 0.0f;
+        security_tile_image_rect(d, cam, &x0, &y0, &x1, &y1, &sy0, &sy1);
+        draw_security_detections_for_cam(d, cam, x0, y0, x1, y1, &persons, &nearest);
+        draw_security_status(d, cam, x0, sy0, x1, sy1, persons, nearest);
+        draw_outline_rect(d, x0, y0, x1, y1, 0.08f, 0.10f, 0.13f, 1.0f);
+    }
+    pthread_mutex_unlock(&d->det_lock);
+}
+
 static void draw_camera_detections_rect(display_t *d, int cam,
                                         float x0, float y0, float x1, float y1)
 {
@@ -1389,6 +1613,7 @@ void disp_draw(display_t *d)
     case DISPLAY_MODE_GRID:          draw_grid_mode(d);         break;
     case DISPLAY_MODE_FISHEYE_GRID:  draw_fisheye_grid_mode(d); break;
     case DISPLAY_MODE_OEM_AVM:       draw_oem_avm_mode(d);      break;
+    case DISPLAY_MODE_SECURITY:      draw_security_mode(d);     break;
     }
 
     if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
@@ -1513,7 +1738,7 @@ void disp_close(display_t *d)
     }
     glDeleteProgram(d->program);
     glDeleteProgram(d->osd_prog);
-    if (d->mode == DISPLAY_MODE_FISHEYE_GRID) {
+    if (d->mode == DISPLAY_MODE_FISHEYE_GRID || d->mode == DISPLAY_MODE_SECURITY) {
         glDeleteProgram(d->mesh_prog);
     }
     for (int i = 0; i < d->n_cams; i++) {
