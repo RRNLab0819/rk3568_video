@@ -687,7 +687,7 @@ display_t *disp_open(int width, int height, int n_cameras)
     }
 
     /* ---- Per-camera params: FOV, rotate, flip (env overrides) ---- */
-    float fov_cam[4]    = { 160.0f, 160.0f, 160.0f, 160.0f };
+    float fov_cam[4]    = { 150.0f, 150.0f, 150.0f, 150.0f };
     int   rot_cam[4]    = { 0, 0, 0, 0 };
     bool  flipx_cam[4]  = { false, false, false, false };
     bool  flipy_cam[4]  = { false, false, false, false };
@@ -764,13 +764,12 @@ display_t *disp_open(int width, int height, int n_cameras)
             float tw = (debug_cam >= 0) ? 2.0f : qw;
             float th = (debug_cam >= 0) ? 2.0f : qh;
             if (d->mode == DISPLAY_MODE_SECURITY && debug_cam < 0) {
-                float pad_x = 0.018f;
-                float pad_y = 0.018f;
-                float status_h = th * 0.105f;
+                float pad_x = 0.006f;
+                float pad_y = 0.006f;
                 x0 += pad_x;
                 y0 += pad_y;
                 tw -= pad_x * 2.0f;
-                th -= pad_y * 2.0f + status_h;
+                th -= pad_y * 2.0f;
             }
 
             printf("  cam%d: fov=%.0f rot=%d flip=%d,%d rect=[%.2f,%.2f,%.2f,%.2f]\n",
@@ -1220,16 +1219,15 @@ static void security_tile_image_rect(display_t *d, int cam,
     int row = cam / cols;
     float tile_x0 = -1.0f + col * qw;
     float tile_y0 =  1.0f - (row + 1) * qh;
-    float pad_x = 0.018f;
-    float pad_y = 0.018f;
-    float status_h = qh * 0.105f;
+    float pad_x = 0.006f;
+    float pad_y = 0.006f;
 
     *x0 = tile_x0 + pad_x;
     *x1 = tile_x0 + qw - pad_x;
     *y0 = tile_y0 + pad_y;
-    *y1 = tile_y0 + qh - pad_y - status_h;
-    *status_y0 = *y1;
-    *status_y1 = tile_y0 + qh - pad_y;
+    *y1 = tile_y0 + qh - pad_y;
+    *status_y0 = *y1 - 0.040f;
+    *status_y1 = *y1;
 }
 
 static float security_estimate_distance_m(display_t *d, int cam, const detection_t *dt)
@@ -1309,14 +1307,12 @@ static void draw_security_detections_for_cam(display_t *d, int cam,
         float by0 = y1 - max_v * (y1 - y0);
 
         draw_outline_rect(d, bx0, by0, bx1, by1, r, g, b, 1.0f);
-        draw_outline_rect(d, bx0 - 0.006f, by0 - 0.006f,
-                          bx1 + 0.006f, by1 + 0.006f, r, g, b, 0.45f);
 
         float foot_u = 0.5f * (min_u + max_u);
         float foot_x = x0 + foot_u * (x1 - x0);
         float foot_y = by0;
-        draw_osd_line(d, foot_x - 0.018f, foot_y, foot_x + 0.018f, foot_y, r, g, b, 1.0f);
-        draw_osd_line(d, foot_x, foot_y - 0.018f, foot_x, foot_y + 0.018f, r, g, b, 1.0f);
+        draw_osd_line(d, foot_x - 0.012f, foot_y, foot_x + 0.012f, foot_y, r, g, b, 1.0f);
+        draw_osd_line(d, foot_x, foot_y - 0.012f, foot_x, foot_y + 0.012f, r, g, b, 1.0f);
     }
 }
 
@@ -1327,45 +1323,41 @@ static void draw_security_status(display_t *d, int cam,
     float rr, rg, rb;
     security_risk_color(d, nearest_m, &rr, &rg, &rb);
 
-    draw_filled_rect(d, x0, y0, x1, y1, 0.012f, 0.014f, 0.018f, 0.96f);
-    draw_filled_rect(d, x0, y0, x0 + 0.018f, y1, rr, rg, rb, 1.0f);
-    draw_outline_rect(d, x0, y0, x1, y1, 0.16f, 0.18f, 0.22f, 1.0f);
+    (void)y0;
+    float top = y1;
+    float line_h = 0.010f;
+    draw_filled_rect(d, x0, top - line_h, x1, top, 0.005f, 0.006f, 0.008f, 0.86f);
+    draw_filled_rect(d, x0, top - line_h, x0 + (x1 - x0) * 0.22f,
+                     top, rr, rg, rb, 1.0f);
 
-    float cx = x0 + 0.058f;
-    float cy = (y0 + y1) * 0.5f;
-    float s = (y1 - y0) * 0.26f;
-    draw_outline_rect(d, cx - s, cy - s, cx + s, cy + s, 0.70f, 0.82f, 0.94f, 1.0f);
-    draw_osd_line(d, cx - s * 0.55f, cy, cx + s * 0.55f, cy, 0.70f, 0.82f, 0.94f, 1.0f);
-    draw_osd_line(d, cx, cy - s * 0.55f, cx, cy + s * 0.55f, 0.70f, 0.82f, 0.94f, 1.0f);
+    float badge_x0 = x0 + 0.018f;
+    float badge_y1 = top - 0.020f;
+    float badge_y0 = badge_y1 - 0.055f;
+    float badge_x1 = badge_x0 + 0.118f;
+    draw_filled_rect(d, badge_x0, badge_y0, badge_x1, badge_y1,
+                     0.010f, 0.012f, 0.016f, 0.78f);
+    draw_outline_rect(d, badge_x0, badge_y0, badge_x1, badge_y1,
+                      0.12f, 0.15f, 0.20f, 0.92f);
 
-    float cam_mark_x = x0 + 0.112f + cam * 0.030f;
-    draw_filled_rect(d, cam_mark_x, cy - s * 0.28f,
-                     cam_mark_x + 0.018f, cy + s * 0.28f,
-                     0.70f, 0.82f, 0.94f, 1.0f);
+    float cy = (badge_y0 + badge_y1) * 0.5f;
+    float mark_x = badge_x0 + 0.020f + cam * 0.019f;
+    draw_filled_rect(d, mark_x, cy - 0.010f, mark_x + 0.012f, cy + 0.010f,
+                     0.66f, 0.78f, 0.90f, 1.0f);
 
-    float px = x0 + 0.280f;
-    for (int i = 0; i < person_count && i < 6; i++) {
-        float bx = px + i * 0.028f;
-        draw_filled_rect(d, bx, cy - s * 0.40f, bx + 0.012f, cy + s * 0.30f,
-                         rr, rg, rb, 1.0f);
-        draw_filled_rect(d, bx - 0.004f, cy + s * 0.34f, bx + 0.016f, cy + s * 0.56f,
-                         rr, rg, rb, 1.0f);
+    for (int i = 0; i < person_count && i < 4; i++) {
+        float dot_x = badge_x1 + 0.018f + i * 0.022f;
+        float dot_y = cy;
+        draw_filled_rect(d, dot_x - 0.006f, dot_y - 0.006f,
+                         dot_x + 0.006f, dot_y + 0.006f,
+                         rr, rg, rb, 0.94f);
     }
 
-    float meter_x0 = x1 - 0.260f;
-    float meter_x1 = x1 - 0.040f;
-    float meter_y0 = cy - s * 0.28f;
-    float meter_y1 = cy + s * 0.28f;
-    draw_outline_rect(d, meter_x0, meter_y0, meter_x1, meter_y1,
-                      0.30f, 0.34f, 0.40f, 1.0f);
-    float fill = 0.0f;
     if (nearest_m > 0.0f) {
-        fill = 1.0f - fminf(nearest_m, 6.0f) / 6.0f;
-        if (fill < 0.06f) fill = 0.06f;
+        float tick_w = (nearest_m <= d->security_warn_near_m) ? 0.050f :
+                       (nearest_m <= d->security_warn_mid_m) ? 0.034f : 0.022f;
+        draw_filled_rect(d, x1 - 0.030f - tick_w, top - 0.032f,
+                         x1 - 0.030f, top - 0.020f, rr, rg, rb, 0.96f);
     }
-    draw_filled_rect(d, meter_x0, meter_y0,
-                     meter_x0 + (meter_x1 - meter_x0) * fill, meter_y1,
-                     rr, rg, rb, 1.0f);
 }
 
 static void draw_security_mode(display_t *d)

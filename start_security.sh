@@ -65,7 +65,8 @@ fi
 
 export SECURITY_MODE=1
 export FISHEYE_CALIB_DIR="$CALIB_DIR"
-export FISHEYE_FOV="${FISHEYE_FOV:-160,160,160,160}"
+# 150 keeps more usable detail than the wider 160 view. Override when testing coverage.
+export FISHEYE_FOV="${FISHEYE_FOV:-150,150,150,150}"
 export FISHEYE_ROTATE="${FISHEYE_ROTATE:-0,0,0,0}"
 export FISHEYE_FLIPX="${FISHEYE_FLIPX:-0,0,0,0}"
 export FISHEYE_FLIPY="${FISHEYE_FLIPY:-0,0,0,0}"
