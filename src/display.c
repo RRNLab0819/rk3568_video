@@ -520,15 +520,10 @@ void disp_set_detections(display_t *d, const detection_t *dets, int n)
 {
     if (!d) return;
     pthread_mutex_lock(&d->det_lock);
-    /* Only clear channels that have new data in this batch */
-    bool has_new[4] = {false, false, false, false};
-    for (int i = 0; i < n; i++) {
-        int cam = dets[i].cam_idx;
-        if (cam >= 0 && cam < 4) has_new[cam] = true;
-    }
-    for (int c = 0; c < 4; c++) {
-        if (has_new[c]) d->det_count[c] = 0;
-    }
+    /* The pipeline returns a full snapshot. Clear stale boxes even when a
+     * camera currently has no detections, otherwise old boxes freeze onscreen. */
+    for (int c = 0; c < 4; c++)
+        d->det_count[c] = 0;
     for (int i = 0; i < n; i++) {
         int cam = dets[i].cam_idx;
         if (cam < 0 || cam >= 4) continue;

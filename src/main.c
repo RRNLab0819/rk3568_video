@@ -314,7 +314,7 @@ int main(int argc, char **argv)
             /* Push detections to display overlay */
             detection_t dets[MAX_DETECTIONS];
             int nd = pipe_get_detections(g_pipe, dets, MAX_DETECTIONS);
-            if (nd > 0) disp_set_detections(g_disp, dets, nd);
+            disp_set_detections(g_disp, dets, nd);
             for (int i=0; i<n_cams; i++) {
                 ring_t *r = pipe_display_ring(g_pipe, i);
                 frame_t f;
