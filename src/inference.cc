@@ -597,7 +597,7 @@ static bool build_rectified_map(infer_t *inf, int cam, int fw, int fh, letterbox
                 continue;
 
             float u = ((float)(x - x_pad) + 0.5f) / (float)rw;
-            float v = ((float)(y - y_pad) + 0.5f) / (float)rh;
+            float v = 1.0f - (((float)(y - y_pad) + 0.5f) / (float)rh);
             float raw_u = 0.5f, raw_v = 0.5f;
             fisheye_view_to_raw_uv(&g_fisheye_cams[cam], &view, u, v, &raw_u, &raw_v);
             inf->rect_map_x[cam][idx] = raw_u * (float)fw;
@@ -960,7 +960,6 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
 
     if (inf->rectified_infer) {
         if (rectified_nv12_to_rgb(inf, f, &lb)) {
-            flip_rgb_vertical(inf->rgb_buf, mw, mh);
             gettimeofday(&_t2, NULL);
             {
                 static int rect_dump = 0;
