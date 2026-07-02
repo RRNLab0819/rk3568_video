@@ -64,7 +64,7 @@ EOF
 fi
 
 export SECURITY_MODE=1
-export RECTIFIED_INFER=1
+export RECTIFIED_INFER=0
 export FISHEYE_CALIB_DIR="$CALIB_DIR"
 # 150 keeps more usable detail than the wider 160 view. Override when testing coverage.
 export FISHEYE_FOV="${FISHEYE_FOV:-150,150,150,150}"
@@ -83,7 +83,7 @@ echo "[security] calib=$CALIB_DIR"
 echo "[security] extrinsics=$EXTRINSICS"
 echo "[security] fov=$FISHEYE_FOV rot=$FISHEYE_ROTATE flipx=$FISHEYE_FLIPX flipy=$FISHEYE_FLIPY"
 echo "[security] person_height=${SECURITY_PERSON_HEIGHT_M}m warn=${SECURITY_WARN_NEAR_M}/${SECURITY_WARN_MID_M}m"
-echo "[security] rectified_infer=$RECTIFIED_INFER"
+echo "[security] rectified_infer=$RECTIFIED_INFER (raw RKNN inference, projected boxes)"
 echo "[security] launching $BIN ..."
 
 cd /userdata && LD_LIBRARY_PATH=/usr/lib "$BIN" -m "$MODEL" -c 4 --no-enc
