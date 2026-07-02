@@ -11,6 +11,10 @@
 #include "inference.h"
 #include "yolov5.h"
 #include "postprocess.h"
+extern "C" {
+#include "fisheye_mesh.h"
+#include "fisheye_project.h"
+}
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +37,16 @@ struct inference_s {
     int                  nv12_size;
     float                conf_thresh, nms_thresh;
     bool                 rga_enable;
+    bool                 rectified_infer;
+    bool                 rect_map_ready[4];
+    float               *rect_map_x[4];
+    float               *rect_map_y[4];
+    float                rect_fov[4];
+    float                rect_yaw[4];
+    float                rect_pitch[4];
+    int                  rect_rot[4];
+    bool                 rect_flipx[4];
+    bool                 rect_flipy[4];
 
     /* RGA dma_buf preprocess — pre-allocated at infer_open, reused per frame */
     rga_buffer_handle_t  dst_nv12_handle;  /* importbuffer_virtualaddr of nv12_buf */
@@ -467,6 +481,159 @@ static void flip_rgb_vertical(uint8_t *rgb, int w, int h)
     free(tmp);
 }
 
+static void parse_float4_env(const char *name, float out[4], float defv)
+{
+    for (int i = 0; i < 4; i++) out[i] = defv;
+    const char *e = getenv(name);
+    if (!e || !e[0]) return;
+    char buf[128];
+    strncpy(buf, e, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    char *tok = strtok(buf, ",");
+    for (int i = 0; i < 4 && tok; i++, tok = strtok(NULL, ","))
+        out[i] = (float)atof(tok);
+}
+
+static void parse_int4_env(const char *name, int out[4], int defv)
+{
+    for (int i = 0; i < 4; i++) out[i] = defv;
+    const char *e = getenv(name);
+    if (!e || !e[0]) return;
+    char buf[128];
+    strncpy(buf, e, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    char *tok = strtok(buf, ",");
+    for (int i = 0; i < 4 && tok; i++, tok = strtok(NULL, ","))
+        out[i] = atoi(tok);
+}
+
+static void parse_bool4_env(const char *name, bool out[4], bool defv)
+{
+    int tmp[4];
+    parse_int4_env(name, tmp, defv ? 1 : 0);
+    for (int i = 0; i < 4; i++) out[i] = (tmp[i] != 0);
+}
+
+static void nv12_sample_rgb_bilinear(const uint8_t *nv12, int sw, int sh, int stride,
+                                     float sx, float sy, uint8_t *rgb)
+{
+    if (sx < 0.0f) sx = 0.0f;
+    if (sy < 0.0f) sy = 0.0f;
+    if (sx > (float)(sw - 2)) sx = (float)(sw - 2);
+    if (sy > (float)(sh - 2)) sy = (float)(sh - 2);
+
+    int x0 = (int)sx;
+    int y0 = (int)sy;
+    float wx = sx - (float)x0;
+    float wy = sy - (float)y0;
+    const uint8_t *yrow0 = nv12 + y0 * stride;
+    const uint8_t *yrow1 = nv12 + (y0 + 1) * stride;
+    float yv = yrow0[x0] * (1.0f - wx) * (1.0f - wy) +
+               yrow0[x0 + 1] * wx * (1.0f - wy) +
+               yrow1[x0] * (1.0f - wx) * wy +
+               yrow1[x0 + 1] * wx * wy;
+
+    int uvx = x0 & ~1;
+    if (uvx >= sw - 1) uvx = sw - 2;
+    int uvy = y0 / 2;
+    if (uvy >= sh / 2) uvy = sh / 2 - 1;
+    const uint8_t *uvrow = nv12 + stride * sh + uvy * stride;
+    int Y = (int)(yv + 0.5f);
+    int U = uvrow[uvx];
+    int V = uvrow[uvx + 1];
+    int C = Y - 16, D = U - 128, E = V - 128;
+    int rv = (298 * C + 409 * E + 128) >> 8;
+    int gv = (298 * C - 100 * D - 208 * E + 128) >> 8;
+    int bv = (298 * C + 516 * D + 128) >> 8;
+    rgb[0] = (rv < 0) ? 0 : (rv > 255 ? 255 : rv);
+    rgb[1] = (gv < 0) ? 0 : (gv > 255 ? 255 : gv);
+    rgb[2] = (bv < 0) ? 0 : (bv > 255 ? 255 : bv);
+}
+
+static bool build_rectified_map(infer_t *inf, int cam, int fw, int fh, letterbox_t *lb)
+{
+    if (!inf || cam < 0 || cam >= 4 || !lb) return false;
+    int mw = inf->mw, mh = inf->mh;
+    if (inf->rect_map_ready[cam]) return true;
+
+    float sw = (float)mw / (float)fw;
+    float sh = (float)mh / (float)fh;
+    float scale = (sw < sh) ? sw : sh;
+    int rw = (int)(fw * scale);
+    int rh = (int)(fh * scale);
+    if (rw % 4 != 0) rw -= rw % 4;
+    if (rh % 2 != 0) rh -= rh % 2;
+    int x_pad = (mw - rw) / 2;
+    int y_pad = (mh - rh) / 2;
+    if (x_pad % 2 != 0) { x_pad -= x_pad % 2; if (x_pad < 0) x_pad = 0; }
+    if (y_pad % 2 != 0) { y_pad -= y_pad % 2; if (y_pad < 0) y_pad = 0; }
+    lb->scale = scale;
+    lb->x_pad = x_pad;
+    lb->y_pad = y_pad;
+
+    size_t n = (size_t)mw * (size_t)mh;
+    inf->rect_map_x[cam] = (float *)malloc(n * sizeof(float));
+    inf->rect_map_y[cam] = (float *)malloc(n * sizeof(float));
+    if (!inf->rect_map_x[cam] || !inf->rect_map_y[cam])
+        return false;
+
+    fisheye_view_t view = {
+        .fov_h_deg = inf->rect_fov[cam],
+        .yaw_deg = inf->rect_yaw[cam],
+        .pitch_deg = inf->rect_pitch[cam],
+        .out_w = fw,
+        .out_h = fh,
+        .rotate_deg = inf->rect_rot[cam],
+        .flip_x = inf->rect_flipx[cam],
+        .flip_y = inf->rect_flipy[cam],
+    };
+
+    for (int y = 0; y < mh; y++) {
+        for (int x = 0; x < mw; x++) {
+            int idx = y * mw + x;
+            inf->rect_map_x[cam][idx] = -1.0f;
+            inf->rect_map_y[cam][idx] = -1.0f;
+            if (x < x_pad || x >= x_pad + rw || y < y_pad || y >= y_pad + rh)
+                continue;
+
+            float u = ((float)(x - x_pad) + 0.5f) / (float)rw;
+            float v = ((float)(y - y_pad) + 0.5f) / (float)rh;
+            float raw_u = 0.5f, raw_v = 0.5f;
+            fisheye_view_to_raw_uv(&g_fisheye_cams[cam], &view, u, v, &raw_u, &raw_v);
+            inf->rect_map_x[cam][idx] = raw_u * (float)fw;
+            inf->rect_map_y[cam][idx] = raw_v * (float)fh;
+        }
+    }
+
+    inf->rect_map_ready[cam] = true;
+    fprintf(stderr, "[infer] rectified map cam%d: model=%dx%d content=%dx%d pad=(%d,%d) fov=%.0f\n",
+            cam, mw, mh, rw, rh, x_pad, y_pad, inf->rect_fov[cam]);
+    return true;
+}
+
+static bool rectified_nv12_to_rgb(infer_t *inf, const frame_t *f, letterbox_t *lb)
+{
+    int cam = f ? (int)f->cam_idx : -1;
+    if (!inf || !f || !f->ptr || cam < 0 || cam >= 4) return false;
+    int mw = inf->mw, mh = inf->mh;
+    if (!build_rectified_map(inf, cam, (int)f->width, (int)f->height, lb))
+        return false;
+
+    memset(inf->rgb_buf, 114, (size_t)mw * (size_t)mh * 3);
+    const uint8_t *nv12 = (const uint8_t *)f->ptr;
+    for (int y = 0; y < mh; y++) {
+        for (int x = 0; x < mw; x++) {
+            int idx = y * mw + x;
+            float sx = inf->rect_map_x[cam][idx];
+            float sy = inf->rect_map_y[cam][idx];
+            if (sx < 0.0f || sy < 0.0f) continue;
+            nv12_sample_rgb_bilinear(nv12, (int)f->width, (int)f->height, (int)f->stride,
+                                     sx, sy, inf->rgb_buf + idx * 3);
+        }
+    }
+    return true;
+}
+
 /* ================================================================== */
 static void dump_ppm(const char *path, const uint8_t *rgb, int w, int h)
 {
@@ -630,6 +797,24 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
         }
     }
 
+    {
+        int keep = 0;
+        for (int i = 0; i < n; i++) {
+            if (dets[i].class_id != 0) continue;
+            if (!std::isfinite(dets[i].confidence)) continue;
+            if (dets[i].w <= 2 || dets[i].h <= 2) continue;
+            if (dets[i].x < 0) { dets[i].w += dets[i].x; dets[i].x = 0; }
+            if (dets[i].y < 0) { dets[i].h += dets[i].y; dets[i].y = 0; }
+            if (dets[i].x >= 1920 || dets[i].y >= 1080) continue;
+            if (dets[i].x + dets[i].w > 1920) dets[i].w = 1920 - dets[i].x;
+            if (dets[i].y + dets[i].h > 1080) dets[i].h = 1080 - dets[i].y;
+            if (dets[i].w <= 2 || dets[i].h <= 2) continue;
+            if (keep != i) dets[keep] = dets[i];
+            keep++;
+        }
+        n = keep;
+    }
+
     rknn_outputs_release(ctx->rknn_ctx, no, out);
     free(out);
     gettimeofday(&_t5, NULL);
@@ -667,6 +852,23 @@ extern "C" infer_t *infer_open(const char *model_path, float conf, float nms, bo
     {
         const char *f = getenv("FLIP_INPUT");
         inf->flip_input = !(f && f[0] == '0');
+    }
+    {
+        const char *ri = getenv("RECTIFIED_INFER");
+        inf->rectified_infer = (ri && ri[0] == '1');
+        parse_float4_env("FISHEYE_FOV", inf->rect_fov, 150.0f);
+        parse_float4_env("SECURITY_VIEW_YAW", inf->rect_yaw, 0.0f);
+        parse_float4_env("SECURITY_VIEW_PITCH", inf->rect_pitch, 0.0f);
+        parse_int4_env("FISHEYE_ROTATE", inf->rect_rot, 0);
+        parse_bool4_env("FISHEYE_FLIPX", inf->rect_flipx, false);
+        parse_bool4_env("FISHEYE_FLIPY", inf->rect_flipy, false);
+        if (inf->rectified_infer) {
+            const char *calib_dir = getenv("FISHEYE_CALIB_DIR");
+            if (calib_dir && calib_dir[0])
+                fisheye_load_calibration_dir(calib_dir, 4);
+            fprintf(stderr, "[infer] rectified inference ON calib=%s\n",
+                    (calib_dir && calib_dir[0]) ? calib_dir : "(fallback)");
+        }
     }
 
     if (load_model(model_path, &inf->app_ctx) < 0) {
@@ -706,9 +908,9 @@ extern "C" infer_t *infer_open(const char *model_path, float conf, float nms, bo
     }
 
     fprintf(stderr, "[infer] ready: model=%s conf=%.2f nms=%.2f "
-            "input=%dx%d rga=%d dst_handle=0x%lx rgb_buf=%d nv12_buf=%d\n",
+            "input=%dx%d rga=%d rectified=%d dst_handle=0x%lx rgb_buf=%d nv12_buf=%d\n",
             model_path, conf, nms,
-            inf->mw, inf->mh, inf->rga_enable,
+            inf->mw, inf->mh, inf->rga_enable, inf->rectified_infer,
             (unsigned long)inf->dst_nv12_handle, inf->rgb_size, inf->nv12_size);
     return inf;
 }
@@ -755,6 +957,40 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
 
     struct timeval _t0, _t2;
     gettimeofday(&_t0, NULL);
+
+    if (inf->rectified_infer) {
+        if (rectified_nv12_to_rgb(inf, f, &lb)) {
+            flip_rgb_vertical(inf->rgb_buf, mw, mh);
+            gettimeofday(&_t2, NULL);
+            {
+                static int rect_dump = 0;
+                if (rect_dump < 3) {
+                    char path[64];
+                    snprintf(path, sizeof(path), "/tmp/infer_rectified_%d.ppm", rect_dump);
+                    dump_ppm(path, inf->rgb_buf, mw, mh);
+                    dump_color_stats("rectified", inf->rgb_buf, mw, mh);
+                    fprintf(stderr, "[diag] rectified dump %d/3: %s scale=%.4f pad=(%d,%d) cam=%d\n",
+                            rect_dump + 1, path, lb.scale, lb.x_pad, lb.y_pad, (int)f->cam_idx);
+                    rect_dump++;
+                }
+            }
+            {
+                static int cnt = 0;
+                if ((++cnt & 31) == 0) {
+                    float prep_ms = (_t2.tv_sec - _t0.tv_sec)*1000.0f + (_t2.tv_usec - _t0.tv_usec)/1000.0f;
+                    inf->preprocess_total_ms = prep_ms;
+                    fprintf(stderr, "[prep] rectified cpu=%.1f total=%.1f ms\n",
+                            prep_ms, prep_ms);
+                }
+            }
+            return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
+        }
+        static int rect_fail_logged = 0;
+        if (!rect_fail_logged) {
+            rect_fail_logged = 1;
+            fprintf(stderr, "[infer] rectified preprocess failed, falling back to normal input\n");
+        }
+    }
 
     /* ---- OpenCV backend (bypass RGA/CPU, use cv::cvtColor) ---- */
     preprocess_backend_t backend = detect_backend();
@@ -1021,6 +1257,10 @@ extern "C" void infer_close(infer_t *inf)
     free(inf->rgb_buf);
     free(inf->diag_rgb_buf);
     free(inf->nv12_buf);
+    for (int i = 0; i < 4; i++) {
+        free(inf->rect_map_x[i]);
+        free(inf->rect_map_y[i]);
+    }
     if (inf->dst_nv12_handle)
         releasebuffer_handle(inf->dst_nv12_handle);
     if (inf->app_ctx.rknn_ctx)

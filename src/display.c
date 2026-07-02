@@ -97,6 +97,7 @@ struct display_s {
     float                   security_person_height_m;
     float                   security_warn_near_m;
     float                   security_warn_mid_m;
+    bool                    security_rectified_dets;
 
     /* Mesh shader (shared by FISHEYE_GRID and AVM modes) */
     GLuint      mesh_prog;
@@ -673,6 +674,10 @@ display_t *disp_open(int width, int height, int n_cameras)
             d->mode = DISPLAY_MODE_FISHEYE_GRID;
         else
             d->mode = DISPLAY_MODE_GRID;
+    }
+    {
+        const char *ri = getenv("RECTIFIED_INFER");
+        d->security_rectified_dets = (ri && ri[0] == '1');
     }
 
     /* ---- Compile mesh shader for calibrated fisheye views ---- */
@@ -1292,6 +1297,13 @@ static float security_estimate_distance_m(display_t *d, int cam, const detection
     if (!d || !dt || cam < 0 || cam >= 4 || dt->h <= 2)
         return 0.0f;
 
+    if (d->security_rectified_dets) {
+        float fov = d->fisheye_fov[cam] > 1.0f ? d->fisheye_fov[cam] : 150.0f;
+        float fov_rad = fov * (float)(M_PI / 180.0);
+        float focal_px = 1920.0f / (2.0f * tanf(fov_rad * 0.5f));
+        return d->security_person_height_m * focal_px / (float)dt->h;
+    }
+
     fisheye_view_t view = {
         .fov_h_deg = d->fisheye_fov[cam],
         .yaw_deg = d->fisheye_yaw[cam],
@@ -1333,12 +1345,6 @@ static void draw_security_detections_for_cam(display_t *d, int cam,
         detection_t *dt = &d->dets[cam][i];
         if (dt->class_id != 0) continue;
 
-        float min_u, min_v, max_u, max_v, visible_fraction = 0.0f;
-        if (!security_bbox_to_view_uv(d, cam, dt,
-                                      &min_u, &min_v, &max_u, &max_v,
-                                      &visible_fraction))
-            continue;
-
         float dist_m = security_estimate_distance_m(d, cam, dt);
         if (dist_m > 0.0f && (*nearest_m <= 0.0f || dist_m < *nearest_m))
             *nearest_m = dist_m;
@@ -1346,10 +1352,26 @@ static void draw_security_detections_for_cam(display_t *d, int cam,
 
         float r, g, b;
         security_risk_color(d, dist_m, &r, &g, &b);
-        float bx0 = x0 + min_u * (x1 - x0);
-        float bx1 = x0 + max_u * (x1 - x0);
-        float by1 = y1 - min_v * (y1 - y0);
-        float by0 = y1 - max_v * (y1 - y0);
+        float bx0, bx1, by0, by1;
+        if (d->security_rectified_dets) {
+            float sx = (x1 - x0) / 1920.0f;
+            float sy = (y1 - y0) / 1080.0f;
+            bx0 = x0 + (float)dt->x * sx;
+            bx1 = x0 + (float)(dt->x + dt->w) * sx;
+            by1 = y1 - (float)dt->y * sy;
+            by0 = y1 - (float)(dt->y + dt->h) * sy;
+        } else {
+            float min_u, min_v, max_u, max_v, visible_fraction = 0.0f;
+            if (!security_bbox_to_view_uv(d, cam, dt,
+                                          &min_u, &min_v, &max_u, &max_v,
+                                          &visible_fraction))
+                continue;
+
+            bx0 = x0 + min_u * (x1 - x0);
+            bx1 = x0 + max_u * (x1 - x0);
+            by1 = y1 - min_v * (y1 - y0);
+            by0 = y1 - max_v * (y1 - y0);
+        }
 
         draw_outline_rect(d, bx0, by0, bx1, by1, r, g, b, 1.0f);
         draw_distance_label(d, bx0 + 0.010f, by1 - 0.040f, dist_m, r, g, b);
