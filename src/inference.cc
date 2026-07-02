@@ -481,14 +481,27 @@ static void dump_ppm(const char *path, const uint8_t *rgb, int w, int h)
 /* ================================================================== */
 /* Run RKNN inference + postprocess on prepared RGB input              */
 /* ================================================================== */
+static void unflip_detection_y_if_needed(bool input_was_flipped, detection_t *dt, int frame_h)
+{
+    if (!input_was_flipped || !dt || frame_h <= 0 || dt->h <= 0)
+        return;
+
+    int y = frame_h - (dt->y + dt->h);
+    if (y < 0) y = 0;
+    if (y + dt->h > frame_h) dt->h = frame_h - y;
+    dt->y = y;
+}
+
 static int run_inference(infer_t *inf, const uint8_t *rgb,
                          const letterbox_t *lb,
+                         int frame_h,
+                         bool input_was_flipped,
                          detection_t *dets, int max_dets)
 {
     rknn_app_context_t *ctx = &inf->app_ctx;
     int mw = ctx->model_width, mh = ctx->model_height, mc = ctx->model_channel;
 
-    struct timeval _t0, _t1, _t2, _t3, _t4, _t5;
+    struct timeval _t0, _t1, _t2, _t3, _t5;
     gettimeofday(&_t0, NULL);
 
     /* ---- Set input: UINT8 NHWC RGB (aligned with official rknpu2 example) ---- */
@@ -611,6 +624,7 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
                         dets[n].confidence = cf[i];
                         dets[n].x = (int)ox1; dets[n].y = (int)oy1;
                         dets[n].w = (int)ow;  dets[n].h = (int)oh;
+                        unflip_detection_y_if_needed(input_was_flipped, &dets[n], frame_h);
                         n++;
                     }
                 }
@@ -627,6 +641,7 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
             dets[i].confidence = cf[i];
             dets[i].x = (int)bx[i]; dets[i].y = (int)by[i];
             dets[i].w = (int)bw[i]; dets[i].h = (int)bh[i];
+            unflip_detection_y_if_needed(input_was_flipped, &dets[i], frame_h);
         }
     }
 
@@ -739,7 +754,7 @@ extern "C" int infer_detect_rgb(infer_t *inf, const uint8_t *rgb, int w, int h,
         }
     }
 
-    return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
+    return run_inference(inf, inf->rgb_buf, &lb, h, false, dets, max_dets);
 }
 
 /* Camera mode: NV12 frame_t → RGA dma_buf resize+letterbox → CPU NV12→RGB → RKNN */
@@ -775,7 +790,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
             }
         }
         if (inf->flip_input) flip_rgb_vertical(inf->rgb_buf, mw, mh);
-        return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
+        return run_inference(inf, inf->rgb_buf, &lb, fh, inf->flip_input, dets, max_dets);
     }
 
     if (backend == BACKEND_OPENCV_BGR || backend == BACKEND_OPENCV_RGB) {
@@ -798,7 +813,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
             }
         }
         if (inf->flip_input) flip_rgb_vertical(inf->rgb_buf, mw, mh);
-        return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
+        return run_inference(inf, inf->rgb_buf, &lb, fh, inf->flip_input, dets, max_dets);
     }
 
     /* Compute letterbox params */
@@ -955,7 +970,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
         }
     }
 
-    int n_dets = run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
+    int n_dets = run_inference(inf, inf->rgb_buf, &lb, fh, inf->flip_input, dets, max_dets);
 
     /* ---- Dual-path comparison (DIAG_DUAL=1, first 5 frames) ---- */
     {
@@ -972,7 +987,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
             opencv_nv12_letterbox((const uint8_t *)f->ptr, fw, fh,
                                    inf->diag_rgb_buf, mw, mh, &lb2, true);
             detection_t diag_dets[MAX_DETECTIONS];
-            int n2 = run_inference(inf, inf->diag_rgb_buf, &lb2, diag_dets, MAX_DETECTIONS);
+            int n2 = run_inference(inf, inf->diag_rgb_buf, &lb2, fh, false, diag_dets, MAX_DETECTIONS);
 
             /* Print comparison */
             float cur_best = 0, ocv_best = 0;
