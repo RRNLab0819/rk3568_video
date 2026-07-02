@@ -473,10 +473,22 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
         int id = classId[n];
         float obj_conf = objProbs[i];
 
-        od_results->results[last_count].box.left = (int)(clamp(x1, 0, model_in_w) / letter_box->scale);
-        od_results->results[last_count].box.top = (int)(clamp(y1, 0, model_in_h) / letter_box->scale);
-        od_results->results[last_count].box.right = (int)(clamp(x2, 0, model_in_w) / letter_box->scale);
-        od_results->results[last_count].box.bottom = (int)(clamp(y2, 0, model_in_h) / letter_box->scale);
+        float content_w = (float)model_in_w;
+        float content_h = (float)model_in_h;
+        if (letter_box->src_w > 0 && letter_box->src_h > 0 && letter_box->scale > 0.0f) {
+            content_w = (float)letter_box->src_w * letter_box->scale;
+            content_h = (float)letter_box->src_h * letter_box->scale;
+        } else {
+            content_w = (float)(model_in_w - letter_box->x_pad * 2);
+            content_h = (float)(model_in_h - letter_box->y_pad * 2);
+        }
+        if (content_w <= 0.0f || content_w > (float)model_in_w) content_w = (float)model_in_w;
+        if (content_h <= 0.0f || content_h > (float)model_in_h) content_h = (float)model_in_h;
+
+        od_results->results[last_count].box.left = (int)(clamp(x1, 0, (int)content_w) / letter_box->scale);
+        od_results->results[last_count].box.top = (int)(clamp(y1, 0, (int)content_h) / letter_box->scale);
+        od_results->results[last_count].box.right = (int)(clamp(x2, 0, (int)content_w) / letter_box->scale);
+        od_results->results[last_count].box.bottom = (int)(clamp(y2, 0, (int)content_h) / letter_box->scale);
         od_results->results[last_count].prop = obj_conf;
         od_results->results[last_count].cls_id = id;
         last_count++;

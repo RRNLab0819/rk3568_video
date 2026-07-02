@@ -44,6 +44,8 @@ typedef struct {
     float scale;
     int x_pad;
     int y_pad;
+    int src_w;
+    int src_h;
 } letterbox_t;
 
 #endif //_RKNN_MODEL_ZOO_COMMON_H_

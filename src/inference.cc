@@ -199,6 +199,8 @@ static void rgb_letterbox(const uint8_t *src, int sw, int sh,
     lb->scale = scale;
     lb->x_pad = x_pad;
     lb->y_pad = y_pad;
+    lb->src_w = sw;
+    lb->src_h = sh;
 
     /* Fill background */
     memset(dst, bg_color, dw * dh * 3);
@@ -264,6 +266,8 @@ static void nv12_letterbox_rgb(const uint8_t *nv12, int sw, int sh, int sstride,
     lb->scale = scale;
     lb->x_pad = x_pad;
     lb->y_pad = y_pad;
+    lb->src_w = sw;
+    lb->src_h = sh;
 
     memset(rgb, 114, dw * dh * 3);
 
@@ -417,6 +421,8 @@ static void opencv_nv12_letterbox(const uint8_t *nv12, int sw, int sh,
     lb->scale = scale;
     lb->x_pad = x_pad;
     lb->y_pad = y_pad;
+    lb->src_w = sw;
+    lb->src_h = sh;
 
     cv::Mat resized;
     cv::resize(color, resized, cv::Size(rw, rh), 0, 0, cv::INTER_LINEAR);
@@ -1046,6 +1052,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
     if (x_pad % 2 != 0) { x_pad -= x_pad % 2; if (x_pad < 0) x_pad = 0; }
     if (y_pad % 2 != 0) { y_pad -= y_pad % 2; if (y_pad < 0) y_pad = 0; }
     lb.scale = scale; lb.x_pad = x_pad; lb.y_pad = y_pad;
+    lb.src_w = fw; lb.src_h = fh;
 
     inf->rga_ms = 0;
     inf->cpu_nv12_rgb_ms = 0;
