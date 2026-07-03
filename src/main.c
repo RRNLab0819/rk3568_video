@@ -296,8 +296,21 @@ int main(int argc, char **argv)
     int snap_interval = 2;  /* auto-save every 2 seconds */
     int total_snaps = 0;
     int max_snaps = 0;
+    int display_interval_us = 33000;
+    {
+        const char *df = getenv("SECURITY_DISPLAY_FPS");
+        if (!df || !df[0]) df = getenv("DISPLAY_FPS");
+        if (df && df[0]) {
+            int target_fps = atoi(df);
+            if (target_fps >= 5 && target_fps <= 60)
+                display_interval_us = 1000000 / target_fps;
+        }
+    }
     printf("[main] auto-save every %ds, max %d frames per camera\n",
            snap_interval, max_snaps);
+    if (g_disp)
+        printf("[main] display target interval=%dus (%.1ffps)\n",
+               display_interval_us, 1000000.0f / (float)display_interval_us);
     while (1) {
         /* Auto-save check: trigger every snap_interval seconds */
         if (total_snaps < max_snaps) {
@@ -353,7 +366,7 @@ int main(int argc, char **argv)
                 }
             }
             struct timeval now; gettimeofday(&now, NULL);
-            if ((now.tv_sec-last.tv_sec)*1000000L+(now.tv_usec-last.tv_usec) >= 33000) {
+            if ((now.tv_sec-last.tv_sec)*1000000L+(now.tv_usec-last.tv_usec) >= display_interval_us) {
                 disp_draw(g_disp); last = now;
                 pipe_stats_disp_tick(g_pipe);
             }

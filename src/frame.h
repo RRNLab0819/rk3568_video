@@ -131,6 +131,7 @@ typedef struct {
     float  confidence;
     int    x, y, w, h;
     int    cam_idx;      /* which camera produced this detection */
+    int64_t ts_us;       /* inference completion timestamp for stale overlay filtering */
 } detection_t;
 
 #endif /* FRAME_H */

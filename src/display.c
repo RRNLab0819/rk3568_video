@@ -17,6 +17,7 @@
 #include <string.h>
 #include <poll.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <wayland-client.h>
 #include <wayland-egl.h>
 #define EGL_EGLEXT_PROTOTYPES
@@ -100,6 +101,8 @@ struct display_s {
     float                   security_cam_height_m[4];
     float                   security_cam_pitch_deg[4];
     bool                    security_rectified_dets;
+    bool                    security_footpoint_only;
+    float                   security_max_det_age_ms;
 
     /* Mesh shader (shared by FISHEYE_GRID and AVM modes) */
     GLuint      mesh_prog;
@@ -678,6 +681,10 @@ display_t *disp_open(int width, int height, int n_cameras)
     {
         const char *ri = getenv("RECTIFIED_INFER");
         d->security_rectified_dets = (ri && ri[0] == '1');
+        const char *fp = getenv("SECURITY_FOOTPOINT_ONLY");
+        d->security_footpoint_only = (fp && fp[0] == '1');
+        const char *ma = getenv("SECURITY_MAX_BOX_AGE_MS");
+        d->security_max_det_age_ms = ma ? (float)atof(ma) : 350.0f;
     }
 
     /* ---- Compile mesh shader for calibrated fisheye views ---- */
@@ -882,6 +889,9 @@ display_t *disp_open(int width, int height, int n_cameras)
         printf("[display] security mode ON person_height=%.2fm warn=%.1f/%.1fm\n",
                d->security_person_height_m,
                d->security_warn_near_m, d->security_warn_mid_m);
+        printf("[display] security overlay rectified_dets=%d footpoint_only=%d max_age=%.0fms\n",
+               d->security_rectified_dets, d->security_footpoint_only,
+               d->security_max_det_age_ms);
         printf("[display] security extrinsics height=%.2f,%.2f,%.2f,%.2f pitch=%.1f,%.1f,%.1f,%.1f\n",
                d->security_cam_height_m[0], d->security_cam_height_m[1],
                d->security_cam_height_m[2], d->security_cam_height_m[3],
@@ -1389,6 +1399,45 @@ static float estimate_ground_distance_rectified(display_t *d, int cam, const det
     return (dist > 0.05f && dist < 50.0f) ? dist : 0.0f;
 }
 
+static float estimate_ground_distance_raw_footpoint(display_t *d, int cam, const detection_t *dt)
+{
+    if (!d || !dt || cam < 0 || cam >= 4) return 0.0f;
+    float height_m = d->security_cam_height_m[cam];
+    if (height_m <= 0.05f) return 0.0f;
+
+    fisheye_view_t view = {
+        .fov_h_deg = d->fisheye_fov[cam],
+        .yaw_deg = d->fisheye_yaw[cam],
+        .pitch_deg = d->fisheye_pitch[cam],
+        .out_w = d->fisheye_out_w[cam] > 0 ? d->fisheye_out_w[cam] : 960,
+        .out_h = d->fisheye_out_h[cam] > 0 ? d->fisheye_out_h[cam] : 540,
+        .rotate_deg = d->fisheye_rot[cam],
+        .flip_x = d->fisheye_flipx[cam],
+        .flip_y = d->fisheye_flipy[cam],
+    };
+
+    float raw_x = (float)dt->x + (float)dt->w * 0.5f;
+    float raw_y = (float)dt->y + (float)dt->h;
+    float rx = 0.0f, ry = 0.0f, rz = 1.0f;
+    if (!fisheye_raw_pixel_to_camera_ray(&g_fisheye_cams[cam], &view,
+                                         raw_x, raw_y, &rx, &ry, &rz))
+        return 0.0f;
+
+    float pitch = d->security_cam_pitch_deg[cam] * (float)(M_PI / 180.0);
+    ry = -ry; /* raw pixel coordinates grow downward; world ground is negative Y */
+    float cp = cosf(pitch), sp = sinf(pitch);
+    float wy = cp * ry - sp * rz;
+    float wz = sp * ry + cp * rz;
+    float wx = rx;
+
+    if (wy >= -0.001f || wz <= 0.001f) return 0.0f;
+    float t = -height_m / wy;
+    float gx = wx * t;
+    float gz = wz * t;
+    float dist = sqrtf(gx * gx + gz * gz);
+    return (dist > 0.05f && dist < 50.0f) ? dist : 0.0f;
+}
+
 static float security_estimate_distance_m(display_t *d, int cam, const detection_t *dt,
                                           bool *used_ground)
 {
@@ -1407,6 +1456,12 @@ static float security_estimate_distance_m(display_t *d, int cam, const detection
         float fov_rad = fov * (float)(M_PI / 180.0);
         float focal_px = 1920.0f / (2.0f * tanf(fov_rad * 0.5f));
         return d->security_person_height_m * focal_px / (float)dt->h;
+    }
+
+    float ground_dist = estimate_ground_distance_raw_footpoint(d, cam, dt);
+    if (ground_dist > 0.0f) {
+        if (used_ground) *used_ground = true;
+        return ground_dist;
     }
 
     fisheye_view_t view = {
@@ -1446,10 +1501,18 @@ static void draw_security_detections_for_cam(display_t *d, int cam,
                                              bool *nearest_ground)
 {
     if (!d->has_frame[cam] || d->det_count[cam] <= 0) return;
+    struct timeval now_tv;
+    gettimeofday(&now_tv, NULL);
+    int64_t now_us = (int64_t)now_tv.tv_sec * 1000000LL + now_tv.tv_usec;
 
     for (int i = 0; i < d->det_count[cam]; i++) {
         detection_t *dt = &d->dets[cam][i];
         if (dt->class_id != 0) continue;
+        if (d->security_max_det_age_ms > 1.0f && dt->ts_us > 0) {
+            float overlay_age_ms = (float)(now_us - dt->ts_us) / 1000.0f;
+            if (overlay_age_ms > d->security_max_det_age_ms)
+                continue;
+        }
 
         bool used_ground = false;
         float dist_m = security_estimate_distance_m(d, cam, dt, &used_ground);
@@ -1462,7 +1525,36 @@ static void draw_security_detections_for_cam(display_t *d, int cam,
         float r, g, b;
         security_risk_color(d, dist_m, &r, &g, &b);
         float bx0, bx1, by0, by1;
-        if (d->security_rectified_dets) {
+        if (d->security_footpoint_only && !d->security_rectified_dets) {
+            float u = 0.0f, v = 0.0f;
+            float raw_x = (float)dt->x + (float)dt->w * 0.5f;
+            float raw_y = (float)dt->y + (float)dt->h;
+            if (!fisheye_raw_to_output_uv(d, cam, raw_x, raw_y, &u, &v))
+                continue;
+            if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)
+                continue;
+
+            float min_u, min_v, max_u, max_v, visible_fraction = 0.0f;
+            if (security_bbox_to_view_uv(d, cam, dt,
+                                         &min_u, &min_v, &max_u, &max_v,
+                                         &visible_fraction)) {
+                bx0 = x0 + min_u * (x1 - x0);
+                bx1 = x0 + max_u * (x1 - x0);
+                by1 = y1 - min_v * (y1 - y0);
+                by0 = y1 - max_v * (y1 - y0);
+                draw_outline_rect(d, bx0, by0, bx1, by1, r, g, b, 1.0f);
+            }
+
+            float px = x0 + u * (x1 - x0);
+            float py = y1 - v * (y1 - y0);
+            float m = 0.018f;
+            draw_osd_line(d, px - m, py, px + m, py, r, g, b, 1.0f);
+            draw_osd_line(d, px, py - m, px, py + m, r, g, b, 1.0f);
+            draw_filled_rect(d, px - 0.006f, py - 0.006f,
+                             px + 0.006f, py + 0.006f, r, g, b, 0.85f);
+            draw_distance_label(d, px + 0.014f, py + 0.012f, dist_m, r, g, b);
+            continue;
+        } else if (d->security_rectified_dets) {
             float sx = (x1 - x0) / 1920.0f;
             float sy = (y1 - y0) / 1080.0f;
             bx0 = x0 + (float)dt->x * sx;

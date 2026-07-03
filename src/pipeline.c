@@ -222,6 +222,9 @@ static void *infer_thread(void *arg)
             if (n_drawn > 0)
                 memcpy(smooth_dets, person_cand, n_drawn * sizeof(detection_t));
         }
+        int64_t det_ts_us = (int64_t)t_end.tv_sec * 1000000LL + t_end.tv_usec;
+        for (int i = 0; i < n_drawn; i++)
+            smooth_dets[i].ts_us = det_ts_us;
 
         pthread_mutex_lock(&p->det_lock);
         p->det_count[cam] = n_drawn;
