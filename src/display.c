@@ -97,6 +97,8 @@ struct display_s {
     float                   security_person_height_m;
     float                   security_warn_near_m;
     float                   security_warn_mid_m;
+    float                   security_cam_height_m[4];
+    float                   security_cam_pitch_deg[4];
     bool                    security_rectified_dets;
 
     /* Mesh shader (shared by FISHEYE_GRID and AVM modes) */
@@ -130,6 +132,9 @@ struct display_s {
 /* Global Wayland globals (shared across all instances if needed) */
 static struct wl_compositor *g_compositor;
 static struct xdg_wm_base   *g_wm_base;
+
+static void parse_float4_csv(const char *s, float out[4]);
+static void load_security_extrinsics(display_t *d, const char *path);
 
 /* ------------------------------------------------------------------ */
 /* Wayland listeners                                                   */
@@ -758,6 +763,10 @@ display_t *disp_open(int width, int height, int n_cameras)
     d->security_person_height_m = 1.70f;
     d->security_warn_near_m = 1.50f;
     d->security_warn_mid_m = 3.00f;
+    for (int i = 0; i < 4; i++) {
+        d->security_cam_height_m[i] = 0.0f;
+        d->security_cam_pitch_deg[i] = 0.0f;
+    }
     {
         const char *ph = getenv("SECURITY_PERSON_HEIGHT_M");
         const char *wn = getenv("SECURITY_WARN_NEAR_M");
@@ -765,6 +774,12 @@ display_t *disp_open(int width, int height, int n_cameras)
         if (ph && atof(ph) > 0.5f) d->security_person_height_m = atof(ph);
         if (wn && atof(wn) > 0.1f) d->security_warn_near_m = atof(wn);
         if (wm && atof(wm) > d->security_warn_near_m) d->security_warn_mid_m = atof(wm);
+    }
+    {
+        const char *ex = getenv("SECURITY_EXTRINSICS");
+        load_security_extrinsics(d, ex ? ex : "/userdata/calib/security_extrinsics.ini");
+        parse_float4_csv(getenv("SECURITY_CAMERA_HEIGHTS"), d->security_cam_height_m);
+        parse_float4_csv(getenv("SECURITY_CAMERA_PITCHES"), d->security_cam_pitch_deg);
     }
 
     /* ---- Build meshes ---- */
@@ -863,10 +878,16 @@ display_t *disp_open(int width, int height, int n_cameras)
     }
     if (d->mode == DISPLAY_MODE_OEM_AVM)
         printf("[display] OEM AVM mode ON view=%d main_cam=%d\n", d->oem_view, d->oem_main_cam);
-    if (d->mode == DISPLAY_MODE_SECURITY)
+    if (d->mode == DISPLAY_MODE_SECURITY) {
         printf("[display] security mode ON person_height=%.2fm warn=%.1f/%.1fm\n",
                d->security_person_height_m,
                d->security_warn_near_m, d->security_warn_mid_m);
+        printf("[display] security extrinsics height=%.2f,%.2f,%.2f,%.2f pitch=%.1f,%.1f,%.1f,%.1f\n",
+               d->security_cam_height_m[0], d->security_cam_height_m[1],
+               d->security_cam_height_m[2], d->security_cam_height_m[3],
+               d->security_cam_pitch_deg[0], d->security_cam_pitch_deg[1],
+               d->security_cam_pitch_deg[2], d->security_cam_pitch_deg[3]);
+    }
 
     /* OSD program (flat color for detection boxes) */
     d->osd_prog = glCreateProgram();
@@ -1205,8 +1226,8 @@ static void draw_distance_label(display_t *d, float x, float y, float dist_m,
     int tens = scaled / 100;
     int ones = (scaled / 10) % 10;
     int dec = scaled % 10;
-    float s = 0.032f;
-    float gap = 0.006f;
+    float s = 0.024f;
+    float gap = 0.0045f;
     float char_w = s * 0.44f;
     float box_w = (tens > 0 ? char_w + gap : 0.0f) + char_w + gap * 2.0f + char_w + char_w;
     float box_h = s * 0.88f;
@@ -1287,12 +1308,101 @@ static void security_tile_image_rect(display_t *d, int cam,
     *status_y1 = *y1;
 }
 
-static float security_estimate_distance_m(display_t *d, int cam, const detection_t *dt)
+static void parse_float4_csv(const char *s, float out[4])
 {
+    if (!s || !s[0]) return;
+    char buf[128];
+    strncpy(buf, s, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    char *tok = strtok(buf, ",");
+    for (int i = 0; i < 4 && tok; i++, tok = strtok(NULL, ","))
+        out[i] = (float)atof(tok);
+}
+
+static int parse_cam_index(const char *line)
+{
+    int cam = -1;
+    if (sscanf(line, "[cam%d]", &cam) == 1 && cam >= 0 && cam < 4)
+        return cam;
+    return -1;
+}
+
+static void load_security_extrinsics(display_t *d, const char *path)
+{
+    if (!d || !path || !path[0]) return;
+    FILE *fp = fopen(path, "r");
+    if (!fp) return;
+
+    char line[160];
+    int cam = -1;
+    while (fgets(line, sizeof(line), fp)) {
+        int parsed_cam = parse_cam_index(line);
+        if (parsed_cam >= 0) {
+            cam = parsed_cam;
+            continue;
+        }
+        if (cam < 0 || cam >= 4) continue;
+
+        float v = 0.0f;
+        if (sscanf(line, "height_m=%f", &v) == 1 && v > 0.05f) {
+            d->security_cam_height_m[cam] = v;
+        } else if (sscanf(line, "pitch_deg=%f", &v) == 1) {
+            d->security_cam_pitch_deg[cam] = v;
+        }
+    }
+    fclose(fp);
+}
+
+static float estimate_ground_distance_rectified(display_t *d, int cam, const detection_t *dt)
+{
+    if (!d || !dt || cam < 0 || cam >= 4) return 0.0f;
+    float height_m = d->security_cam_height_m[cam];
+    if (height_m <= 0.05f) return 0.0f;
+
+    float fov_h = d->fisheye_fov[cam] > 1.0f ? d->fisheye_fov[cam] : 150.0f;
+    float fov_h_rad = fov_h * (float)(M_PI / 180.0);
+    float fov_v_rad = fov_h_rad * (1080.0f / 1920.0f);
+    float foot_u = ((float)dt->x + (float)dt->w * 0.5f) / 1920.0f;
+    float foot_v = 1.0f - ((float)dt->y + (float)dt->h) / 1080.0f;
+    if (foot_u < 0.0f) foot_u = 0.0f;
+    if (foot_u > 1.0f) foot_u = 1.0f;
+    if (foot_v < 0.0f) foot_v = 0.0f;
+    if (foot_v > 1.0f) foot_v = 1.0f;
+
+    float theta = (foot_u - 0.5f) * fov_h_rad;
+    float phi = (foot_v - 0.5f) * fov_v_rad;
+    float x = tanf(theta);
+    float y = tanf(phi) / cosf(theta);
+    float z = 1.0f;
+
+    float pitch = d->security_cam_pitch_deg[cam] * (float)(M_PI / 180.0);
+    float cp = cosf(pitch), sp = sinf(pitch);
+    float ry = cp * y - sp * z;
+    float rz = sp * y + cp * z;
+    float rx = x;
+
+    if (ry >= -0.001f || rz <= 0.001f) return 0.0f;
+    float t = -height_m / ry;
+    float gx = rx * t;
+    float gz = rz * t;
+    float dist = sqrtf(gx * gx + gz * gz);
+    return (dist > 0.05f && dist < 50.0f) ? dist : 0.0f;
+}
+
+static float security_estimate_distance_m(display_t *d, int cam, const detection_t *dt,
+                                          bool *used_ground)
+{
+    if (used_ground) *used_ground = false;
     if (!d || !dt || cam < 0 || cam >= 4 || dt->h <= 2)
         return 0.0f;
 
     if (d->security_rectified_dets) {
+        float ground_dist = estimate_ground_distance_rectified(d, cam, dt);
+        if (ground_dist > 0.0f) {
+            if (used_ground) *used_ground = true;
+            return ground_dist;
+        }
+
         float fov = d->fisheye_fov[cam] > 1.0f ? d->fisheye_fov[cam] : 150.0f;
         float fov_rad = fov * (float)(M_PI / 180.0);
         float focal_px = 1920.0f / (2.0f * tanf(fov_rad * 0.5f));
@@ -1332,7 +1442,8 @@ static void security_risk_color(display_t *d, float distance_m,
 
 static void draw_security_detections_for_cam(display_t *d, int cam,
                                              float x0, float y0, float x1, float y1,
-                                             int *person_count, float *nearest_m)
+                                             int *person_count, float *nearest_m,
+                                             bool *nearest_ground)
 {
     if (!d->has_frame[cam] || d->det_count[cam] <= 0) return;
 
@@ -1340,9 +1451,12 @@ static void draw_security_detections_for_cam(display_t *d, int cam,
         detection_t *dt = &d->dets[cam][i];
         if (dt->class_id != 0) continue;
 
-        float dist_m = security_estimate_distance_m(d, cam, dt);
-        if (dist_m > 0.0f && (*nearest_m <= 0.0f || dist_m < *nearest_m))
+        bool used_ground = false;
+        float dist_m = security_estimate_distance_m(d, cam, dt, &used_ground);
+        if (dist_m > 0.0f && (*nearest_m <= 0.0f || dist_m < *nearest_m)) {
             *nearest_m = dist_m;
+            if (nearest_ground) *nearest_ground = used_ground;
+        }
         (*person_count)++;
 
         float r, g, b;
@@ -1395,11 +1509,14 @@ static void draw_security_mode(display_t *d)
         float x0, y0, x1, y1, sy0, sy1;
         int persons = 0;
         float nearest = 0.0f;
+        bool nearest_ground = false;
         security_tile_image_rect(d, cam, &x0, &y0, &x1, &y1, &sy0, &sy1);
-        draw_security_detections_for_cam(d, cam, x0, y0, x1, y1, &persons, &nearest);
+        draw_security_detections_for_cam(d, cam, x0, y0, x1, y1,
+                                         &persons, &nearest, &nearest_ground);
         if ((dist_log_seq % 90) == 0 && persons > 0 && nearest > 0.0f)
-            printf("[DIST] cam%d visible_person=%d nearest=%.2fm method=height%.2fm\n",
-                   cam, persons, nearest, d->security_person_height_m);
+            printf("[DIST] cam%d visible_person=%d nearest=%.2fm method=%s\n",
+                   cam, persons, nearest,
+                   nearest_ground ? "ground-height-pitch" : "person-height");
         (void)sy0; (void)sy1; (void)persons; (void)nearest;
         draw_outline_rect(d, x0, y0, x1, y1, 0.04f, 0.05f, 0.06f, 1.0f);
     }

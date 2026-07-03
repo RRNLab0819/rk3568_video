@@ -185,6 +185,12 @@ static float sigmoid(float x) { return 1.0 / (1.0 + expf(-x)); }
 
 static float unsigmoid(float y) { return -1.0 * logf((1.0 / y) - 1.0); }
 
+static bool post_diag_enabled(void)
+{
+    const char *e = getenv("POST_DIAG");
+    return e && e[0] == '1';
+}
+
 inline static int32_t __clip(float val, float min, float max)
 {
     float f = val <= min ? min : (val >= max ? max : val);
@@ -441,7 +447,7 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
     std::set<int> class_set(std::begin(classId), std::end(classId));
 
     /* DIAGNOSTIC: dump raw candidates (one-time) */
-    { static int diag=0; if(!diag){diag=1;
+    { static int diag=0; if(!diag && post_diag_enabled()){diag=1;
         fprintf(stderr,"[post] validCount=%d model_in=%dx%d\n",validCount,model_in_w,model_in_h);
         for(int i=0;i<validCount&&i<20;i++){
             float *b=&filterBoxes[i*4];

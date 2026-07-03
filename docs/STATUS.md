@@ -1,52 +1,70 @@
 # Project Status
 
-Last updated: 2026-05-28
+Last updated: 2026-07-03
+
+## Current Recommended Demo
+
+```bash
+cd /userdata
+./start_security_rectified.sh
+```
+
+Recommended branch:
+
+```text
+codex/rectified-direct-stable
+```
+
+Stable baseline is still preserved on `codex/stable-4ch-ai-enc-display` and should not be used for experimental fisheye or distance changes.
 
 ## Completed
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | 4-ch V4L2 capture | Done | `/dev/video0-3`, 1920x1080 NV12, MMAP + dma_buf export |
-| 2x2 quad display | Done | Wayland + EGL + GLES2, NV12 shader rendering |
+| 4-ch realtime display | Done | Wayland + EGL + GLES2, security view defaults to four full tiles |
 | RKNN YOLOv5 inference | Done | Person-only detection, 4-channel round-robin scheduling |
-| Detection overlay | Done | Boxes are drawn on grid view and supported AVM main/single views |
-| MPP H.265 encode | Usable | Per-camera output to `/tmp/cam_N.h264`; higher load than no-encode mode |
-| Startup scripts | Done | `/userdata/start_ai.sh`, `start_ai_enc.sh`, `start_avm.sh`, `start_avm_enc.sh` |
+| Per-camera fisheye calibration load | Done | Reads `/userdata/calib/calib_videoN.yaml` |
+| Rectified inference path | Done | RKNN sees rectified 640x640 RGB, so boxes are generated in rectified-image space |
+| Detection overlay | Done | Distance labels are compact; duplicate boxes are expected when colocated cameras see the same person |
+| Distance demo | Usable prototype | Uses camera height/pitch ground intersection first, falls back to 1.70m person-height estimate |
+| MPP H.265 encode | Usable but not default | Per-camera output to `/tmp/cam_N.h264`; higher DDR/MPP/GPU load |
 | Stable baseline branch | Done | `codex/stable-4ch-ai-enc-display`, tag `stable-4ch-ai-enc-display-20260527` |
 
 ## Prototype / Partial
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| OEM AVM UI | Prototype | Layout, view switching, bottom toolbar and assist lines exist, but not production AVM |
-| AVM + AI overlay | Partial | Boxes can be shown on main/single camera views; no BEV projection yet |
-| Fisheye mesh code | Prototype | Code exists, but current cameras still need formal calibration and validation |
-| RGA preprocessing | Optional | Supported by code path, actual best setting depends on board load and stability |
-| Encoder long-run stability | Partial | Works in normal tests, still needs longer burn-in under 4-ch AI + display |
+| Camera extrinsics | Partial | Reads `/userdata/calib/security_extrinsics.ini` or env overrides; values still need real measurement |
+| Distance accuracy | Demo only | Good for showing a number, not yet for contractual measurement accuracy |
+| AVM/OEM UI | Prototype only | Not current product route; real AVM needs external calibration, IPM/BEV and blending |
+| RGA preprocessing | Optional | Code path exists; current rectified direct path is CPU preprocessing + RKNN |
+| Encoder long-run stability | Partial | Display + AI is preferred for demos; encode adds system pressure |
 
 ## Not Complete
 
 | Feature | Why it matters |
 |---------|----------------|
-| Formal fisheye calibration | Required for natural-looking correction and any trustworthy geometry |
-| Per-camera extrinsics | Required to know each camera's position and angle relative to the vehicle |
-| IPM/BEV bird-view mapping | Required for real top-down 360 surround view |
-| Seamless stitching/blending | Required to hide boundaries between four cameras |
-| Distance estimation | Requires calibrated ground-plane mapping from image coordinates to real-world distance |
-| OEM-grade UI assets | Current icons/vehicle are primitives; production UI needs designed bitmap/vector assets |
+| Formal extrinsic calibration | Required for trustworthy ground-plane distance and camera-to-camera geometry |
+| Real distance validation | Need measured samples at known distances for every camera |
+| IPM/BEV bird-view mapping | Required for true surround-view stitching |
+| Seamless stitching/blending | Required for OEM AVM appearance |
+| UI asset polish | Security demo is functional; final product UI still needs designed assets and layout tuning |
+| `display.c` split | Current file mixes base display, old AVM, security OSD and helper math |
 
-## Current Recommendation
+## Current Technical Position
 
-Use the stable AI/security route for demos that must be reliable:
+The best current route is security-oriented, not OEM AVM-oriented:
 
-```bash
-/userdata/start_ai.sh
+1. Keep the stable 4-channel baseline untouched.
+2. Use `codex/rectified-direct-stable` for calibrated fisheye, rectified inference and distance demo work.
+3. Let RKNN detect on the rectified image directly, instead of detecting on raw fisheye and trying to project boxes afterward.
+4. Use camera height and pitch as the next measurement inputs. Until strict extrinsics are measured, distance is approximate.
+
+Current performance target from board tests:
+
+```text
+Capture:   ~25 FPS per camera
+Display:   ~25 FPS
+Inference: ~14 FPS total, about 3.4-3.6 FPS per camera
 ```
-
-Use the AVM route only as a UI and interaction prototype:
-
-```bash
-/userdata/start_avm.sh
-```
-
-For the next technical milestone, prioritize calibration data collection before spending more time on fake stitching.

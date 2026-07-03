@@ -397,6 +397,12 @@ static void dump_color_stats(const char *tag, const uint8_t *rgb, int w, int h)
             cmin[0], cmin[1], cmin[2], cmax[0], cmax[1], cmax[2]);
 }
 
+static bool infer_diag_enabled(void)
+{
+    const char *e = getenv("INFER_DIAG");
+    return e && e[0] == '1';
+}
+
 /* ================================================================== */
 /* OpenCV NV12→RGB/BGR letterbox (reference for comparison)             */
 /* ================================================================== */
@@ -713,7 +719,7 @@ static int run_inference(infer_t *inf, const uint8_t *rgb,
         float threshold = inf->conf_thresh;
 
         static int diag_once = 0;
-        if (!diag_once) {
+        if (!diag_once && infer_diag_enabled()) {
             diag_once = 1;
             fprintf(stderr, "[diag] decoded output: %d dets x %d props zp=%d scale=%f\n",
                     n_dets, n_props, ozp, oscale);
@@ -941,7 +947,7 @@ extern "C" int infer_detect_rgb(infer_t *inf, const uint8_t *rgb, int w, int h,
     /* Dump input for verification (one-time) */
     {
         static int once = 0;
-        if (!once) {
+        if (!once && infer_diag_enabled()) {
             once = 1;
             fprintf(stderr, "[diag] letterbox: scale=%.4f x_pad=%d y_pad=%d "
                     "src=%dx%d dst=%dx%d\n",
@@ -972,7 +978,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
             gettimeofday(&_t2, NULL);
             {
                 static int rect_dump = 0;
-                if (rect_dump < 3) {
+                if (rect_dump < 3 && infer_diag_enabled()) {
                     char path[64];
                     snprintf(path, sizeof(path), "/tmp/infer_rectified_%d.ppm", rect_dump);
                     dump_ppm(path, inf->rgb_buf, mw, mh);
@@ -1008,7 +1014,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
         gettimeofday(&_t2, NULL);
         {
             static int nv21_dump = 0;
-            if (nv21_dump < 3) {
+            if (nv21_dump < 3 && infer_diag_enabled()) {
                 char path[64];
                 snprintf(path, sizeof(path), "/tmp/input_nv21_test_%d.ppm", nv21_dump);
                 dump_ppm(path, inf->rgb_buf, mw, mh);
@@ -1031,7 +1037,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
         /* Diagnostic dumps */
         {
             static int ocv_dump = 0;
-            if (ocv_dump < 3) {
+            if (ocv_dump < 3 && infer_diag_enabled()) {
                 char path[64];
                 snprintf(path, sizeof(path), "/tmp/input_opencv_%d.ppm", ocv_dump);
                 dump_ppm(path, inf->rgb_buf, mw, mh);
@@ -1187,7 +1193,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
     /* Diagnostic dump AFTER flip (first 3 frames) — shows actual model input */
     {
         static int dump_count = 0;
-        if (dump_count < 3) {
+        if (dump_count < 3 && infer_diag_enabled()) {
             char path[64];
             snprintf(path, sizeof(path), "/tmp/infer_cam0_%d.ppm", dump_count);
             dump_ppm(path, inf->rgb_buf, mw, mh);
