@@ -87,7 +87,10 @@ int main(int argc, char **argv)
     char test_image[256] = {0};   /* --test-image path */
 
     /* Load config */
-    FILE *cf = fopen("/userdata/rk3568-camera/config.ini", "r");
+    const char *config_path = getenv("RK3568_CONFIG");
+    if (!config_path || !config_path[0])
+        config_path = "/userdata/rk3568-camera/config.ini";
+    FILE *cf = fopen(config_path, "r");
     if (cf) {
         n_cams  = ini_int(cf, "camera", "count", n_cams);
         w       = ini_int(cf, "camera", "width", w);

@@ -27,7 +27,7 @@ capture_t *cap_open(const char *dev, int w, int h, int fps, uint32_t fmt)
     (void)fps;
     capture_t *c = calloc(1, sizeof(*c));
     if (!c) return NULL;
-    c->fd = open(dev, O_RDWR);
+    c->fd = open(dev, O_RDWR | O_NONBLOCK);
     if (c->fd < 0) { perror(dev); goto fail; }
 
     struct v4l2_capability cap;

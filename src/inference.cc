@@ -560,7 +560,6 @@ static bool build_rectified_map(infer_t *inf, int cam, int fw, int fh, letterbox
 {
     if (!inf || cam < 0 || cam >= 4 || !lb) return false;
     int mw = inf->mw, mh = inf->mh;
-    if (inf->rect_map_ready[cam]) return true;
 
     float sw = (float)mw / (float)fw;
     float sh = (float)mh / (float)fh;
@@ -576,6 +575,10 @@ static bool build_rectified_map(infer_t *inf, int cam, int fw, int fh, letterbox
     lb->scale = scale;
     lb->x_pad = x_pad;
     lb->y_pad = y_pad;
+    lb->src_w = fw;
+    lb->src_h = fh;
+
+    if (inf->rect_map_ready[cam]) return true;
 
     size_t n = (size_t)mw * (size_t)mh;
     inf->rect_map_x[cam] = (float *)malloc(n * sizeof(float));

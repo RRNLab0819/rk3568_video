@@ -74,8 +74,51 @@ export FISHEYE_FLIPY="${FISHEYE_FLIPY:-0,0,0,0}"
 export SECURITY_PERSON_HEIGHT_M="${SECURITY_PERSON_HEIGHT_M:-1.70}"
 export SECURITY_WARN_NEAR_M="${SECURITY_WARN_NEAR_M:-1.50}"
 export SECURITY_WARN_MID_M="${SECURITY_WARN_MID_M:-3.00}"
+export SECURITY_INFER_CONF="${SECURITY_INFER_CONF:-0.40}"
+export SECURITY_PERSON_CONF="${SECURITY_PERSON_CONF:-0.30}"
+export SECURITY_PERSIST="${SECURITY_PERSIST:-4}"
+export RK3568_CONFIG=/tmp/security_rectified_config.ini
 
-killall rk3568_camera 2>/dev/null
+cat > "$RK3568_CONFIG" <<EOF
+[camera]
+count = 4
+device = /dev/video
+width  = 1920
+height = 1080
+fps    = 25
+
+[encoder]
+codec   = h265
+bitrate = 4000000
+gop     = 25
+
+[inference]
+enabled         = true
+model           = $MODEL
+interval        = 1
+conf            = $SECURITY_INFER_CONF
+nms             = 0.45
+person_only     = true
+person_conf     = $SECURITY_PERSON_CONF
+smooth_enable   = true
+smooth_alpha    = 0.25
+min_persist     = $SECURITY_PERSIST
+channels        = 0,1,2,3
+round_robin     = true
+rga_preprocess  = false
+
+[display]
+enabled  = true
+
+[output]
+pattern  = /tmp/cam_%d.h264
+frames   = 0
+EOF
+
+pkill -INT rk3568_camera 2>/dev/null
+sleep 1
+pkill -9 rk3568_camera 2>/dev/null
+killall -9 rk3568_camera 2>/dev/null
 sleep 1
 
 echo "[security] model=$MODEL"
@@ -84,6 +127,7 @@ echo "[security] extrinsics=$EXTRINSICS"
 echo "[security] fov=$FISHEYE_FOV rot=$FISHEYE_ROTATE flipx=$FISHEYE_FLIPX flipy=$FISHEYE_FLIPY"
 echo "[security] person_height=${SECURITY_PERSON_HEIGHT_M}m warn=${SECURITY_WARN_NEAR_M}/${SECURITY_WARN_MID_M}m"
 echo "[security] rectified_infer=$RECTIFIED_INFER"
+echo "[security] config=$RK3568_CONFIG conf=$SECURITY_INFER_CONF person_conf=$SECURITY_PERSON_CONF persist=$SECURITY_PERSIST"
 echo "[security] launching $BIN ..."
 
 cd /userdata && LD_LIBRARY_PATH=/usr/lib "$BIN" -m "$MODEL" -c 4 --no-enc
