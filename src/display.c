@@ -103,6 +103,7 @@ struct display_s {
     bool                    security_rectified_dets;
     bool                    security_footpoint_only;
     float                   security_max_det_age_ms;
+    float                   raw_grid_crop;
 
     /* Mesh shader (shared by FISHEYE_GRID and AVM modes) */
     GLuint      mesh_prog;
@@ -685,6 +686,10 @@ display_t *disp_open(int width, int height, int n_cameras)
         d->security_footpoint_only = (fp && fp[0] == '1');
         const char *ma = getenv("SECURITY_MAX_BOX_AGE_MS");
         d->security_max_det_age_ms = ma ? (float)atof(ma) : 350.0f;
+        const char *rc = getenv("SECURITY_RAW_CROP");
+        d->raw_grid_crop = rc ? (float)atof(rc) : 1.0f;
+        if (d->raw_grid_crop < 0.70f) d->raw_grid_crop = 0.70f;
+        if (d->raw_grid_crop > 1.0f) d->raw_grid_crop = 1.0f;
     }
 
     /* ---- Compile mesh shader for calibrated fisheye views ---- */
@@ -1025,12 +1030,16 @@ static void draw_grid_mode(display_t *d)
         int col = i % cols, row = i / cols;
         float x0 = -1.0f + col * qw, x1 = x0 + qw;
         float y1 =  1.0f - row * qh, y0 = y1 - qh;
+        float crop = d->raw_grid_crop > 0.0f ? d->raw_grid_crop : 1.0f;
+        float tc0 = (1.0f - crop) * 0.5f;
+        float tc1 = 1.0f - tc0;
 
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d->texY[i]);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, d->texUV[i]);
         glUniform1i(uy, 0); glUniform1i(uuv, 1);
 
-        float v[] = { x0,y0,0,0, x1,y0,1,0, x1,y1,1,1, x0,y1,0,1 };
+        float v[] = { x0,y0,tc0,tc0, x1,y0,tc1,tc0,
+                      x1,y1,tc1,tc1, x0,y1,tc0,tc1 };
         glVertexAttribPointer(d->loc_pos, 2, GL_FLOAT, GL_FALSE, 16, v);
         glVertexAttribPointer(d->loc_tex, 2, GL_FLOAT, GL_FALSE, 16, v + 2);
         glEnableVertexAttribArray(d->loc_pos);
@@ -1856,29 +1865,70 @@ void disp_draw(display_t *d)
         glUseProgram(d->osd_prog);
         glLineWidth(2.0f);
 
-        static const float ch_colors[4][4] = {
-            {1,0,0,1}, {0,1,0,1}, {0,0,1,1}, {1,1,0,1},
-        };
+        struct timeval now_tv;
+        gettimeofday(&now_tv, NULL);
+        int64_t now_us = (int64_t)now_tv.tv_sec * 1000000LL + now_tv.tv_usec;
         for (int cam = 0; cam < d->n_cams && cam < 4; cam++) {
             if (!d->has_frame[cam] || d->det_count[cam] <= 0) continue;
 
             int col = cam % cols, row = cam / cols;
             float tx0 = -1.0f + col * qw;
             float ty1 =  1.0f - row * qh;
-            float xs = qw / 1920.0f, ys = qh / 1080.0f;
+            float crop = d->raw_grid_crop > 0.0f ? d->raw_grid_crop : 1.0f;
+            float raw_x0 = (1.0f - crop) * 0.5f * 1920.0f;
+            float raw_y0 = (1.0f - crop) * 0.5f * 1080.0f;
+            float raw_w = crop * 1920.0f;
+            float raw_h = crop * 1080.0f;
+            float xs = qw / raw_w, ys = qh / raw_h;
 
-            glUniform4fv(d->osd_color_loc, 1, ch_colors[cam]);
             for (int i = 0; i < d->det_count[cam]; i++) {
                 detection_t *dt = &d->dets[cam][i];
                 if (dt->class_id != 0) continue;
-                float bx = tx0 + dt->x * xs;
-                float by = ty1 - (dt->y + dt->h) * ys;
+                if (d->security_max_det_age_ms > 1.0f && dt->ts_us > 0) {
+                    float overlay_age_ms = (float)(now_us - dt->ts_us) / 1000.0f;
+                    if (overlay_age_ms > d->security_max_det_age_ms)
+                        continue;
+                }
+                float focal = g_fisheye_cams[cam].focal > 1.0f ? g_fisheye_cams[cam].focal : 535.0f;
+                float dist_m = (dt->h > 2) ? d->security_person_height_m * focal / (float)dt->h : 0.0f;
+                float r, g, b;
+                security_risk_color(d, dist_m, &r, &g, &b);
+                glUniform4f(d->osd_color_loc, r, g, b, 1.0f);
+
+                float clipped_x = (float)dt->x;
+                float clipped_y = (float)dt->y;
+                float clipped_w = (float)dt->w;
+                float clipped_h = (float)dt->h;
+                if (clipped_x < raw_x0) {
+                    clipped_w -= raw_x0 - clipped_x;
+                    clipped_x = raw_x0;
+                }
+                if (clipped_y < raw_y0) {
+                    clipped_h -= raw_y0 - clipped_y;
+                    clipped_y = raw_y0;
+                }
+                float raw_x1 = raw_x0 + raw_w;
+                float raw_y1 = raw_y0 + raw_h;
+                if (clipped_x + clipped_w > raw_x1)
+                    clipped_w = raw_x1 - clipped_x;
+                if (clipped_y + clipped_h > raw_y1)
+                    clipped_h = raw_y1 - clipped_y;
+                if (clipped_w <= 2.0f || clipped_h <= 2.0f)
+                    continue;
+
+                float bx = tx0 + (clipped_x - raw_x0) * xs;
+                float by = ty1 - ((clipped_y - raw_y0) + clipped_h) * ys;
                 float bw = dt->w * xs, bh = dt->h * ys;
+                bw = clipped_w * xs;
+                bh = clipped_h * ys;
                 float v[] = { bx,by, bx+bw,by, bx+bw,by+bh, bx,by+bh };
                 glVertexAttribPointer(d->osd_pos, 2, GL_FLOAT, GL_FALSE, 0, v);
                 glEnableVertexAttribArray(d->osd_pos);
                 glDrawArrays(GL_LINE_LOOP, 0, 4);
                 glDisableVertexAttribArray(d->osd_pos);
+
+                draw_distance_label(d, bx + 0.010f, by + bh - 0.040f,
+                                    dist_m, r, g, b);
             }
         }
         pthread_mutex_unlock(&d->det_lock);

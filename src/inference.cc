@@ -34,6 +34,7 @@ struct inference_s {
     uint8_t             *nv12_buf;      /* model input size NV12 buffer (RGA dst) */
     int                  rgb_size;
     bool                 flip_input;    /* vertically flip input (camera is mounted inverted) */
+    bool                 infer_flipy[4];
     int                  nv12_size;
     float                conf_thresh, nms_thresh;
     bool                 rga_enable;
@@ -867,6 +868,8 @@ extern "C" infer_t *infer_open(const char *model_path, float conf, float nms, bo
     {
         const char *f = getenv("FLIP_INPUT");
         inf->flip_input = !(f && f[0] == '0');
+        for (int i = 0; i < 4; i++) inf->infer_flipy[i] = inf->flip_input;
+        parse_bool4_env("INFER_FLIPY", inf->infer_flipy, inf->flip_input);
     }
     {
         const char *ri = getenv("RECTIFIED_INFER");
@@ -1024,7 +1027,8 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
                 nv21_dump++;
             }
         }
-        if (inf->flip_input) flip_rgb_vertical(inf->rgb_buf, mw, mh);
+        int cam_idx = (f->cam_idx < 4) ? (int)f->cam_idx : 0;
+        if (inf->infer_flipy[cam_idx]) flip_rgb_vertical(inf->rgb_buf, mw, mh);
         return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
     }
 
@@ -1047,7 +1051,8 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
                 ocv_dump++;
             }
         }
-        if (inf->flip_input) flip_rgb_vertical(inf->rgb_buf, mw, mh);
+        int cam_idx = (f->cam_idx < 4) ? (int)f->cam_idx : 0;
+        if (inf->infer_flipy[cam_idx]) flip_rgb_vertical(inf->rgb_buf, mw, mh);
         return run_inference(inf, inf->rgb_buf, &lb, dets, max_dets);
     }
 
@@ -1175,7 +1180,8 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
     }
 
     /* Apply default vertical flip — camera sensor is mounted inverted */
-    if (inf->flip_input)
+    int cam_idx = (f->cam_idx < 4) ? (int)f->cam_idx : 0;
+    if (inf->infer_flipy[cam_idx])
         flip_rgb_vertical(inf->rgb_buf, mw, mh);
 
     /* Preprocess timing (every 32nd frame) */
@@ -1201,7 +1207,7 @@ extern "C" int infer_detect(infer_t *inf, const frame_t *f,
             fprintf(stderr, "[diag] dump %d/3: %s %dx%d "
                     "letterbox: src=%dx%d scale=%.4f pad=(%d,%d) flip=%d\n",
                     dump_count + 1, path, mw, mh, fw, fh,
-                    lb.scale, lb.x_pad, lb.y_pad, inf->flip_input);
+                    lb.scale, lb.x_pad, lb.y_pad, inf->infer_flipy[cam_idx]);
             dump_count++;
         }
     }

@@ -56,6 +56,7 @@ export FISHEYE_FOV="${FISHEYE_FOV:-150,150,150,150}"
 export FISHEYE_ROTATE="${FISHEYE_ROTATE:-0,0,0,0}"
 export FISHEYE_FLIPX="${FISHEYE_FLIPX:-0,0,0,0}"
 export FISHEYE_FLIPY="${FISHEYE_FLIPY:-0,0,0,0}"
+export INFER_FLIPY="${INFER_FLIPY:-1,1,1,1}"
 export SECURITY_PERSON_HEIGHT_M="${SECURITY_PERSON_HEIGHT_M:-1.70}"
 export SECURITY_WARN_NEAR_M="${SECURITY_WARN_NEAR_M:-1.50}"
 export SECURITY_WARN_MID_M="${SECURITY_WARN_MID_M:-3.00}"
@@ -109,7 +110,7 @@ sleep 1
 
 echo "[rawfoot] model=$MODEL"
 echo "[rawfoot] calib=$CALIB_DIR extrinsics=$EXTRINSICS"
-echo "[rawfoot] fov=$FISHEYE_FOV footpoint_distance=$SECURITY_FOOTPOINT_ONLY max_age=${SECURITY_MAX_BOX_AGE_MS}ms display_fps=$SECURITY_DISPLAY_FPS"
+echo "[rawfoot] fov=$FISHEYE_FOV footpoint_distance=$SECURITY_FOOTPOINT_ONLY max_age=${SECURITY_MAX_BOX_AGE_MS}ms display_fps=$SECURITY_DISPLAY_FPS infer_flipy=$INFER_FLIPY"
 echo "[rawfoot] conf=$SECURITY_INFER_CONF person_conf=$SECURITY_PERSON_CONF persist=$SECURITY_PERSIST rectified_infer=$RECTIFIED_INFER"
 echo "[rawfoot] launching $BIN ..."
 
