@@ -24,6 +24,7 @@ mkdir -p "$ROOT"
 server_pid="$ROOT/mediamtx.pid"
 pub_pid="$ROOT/cam${CAM}.publisher.pid"
 pub_log="$ROOT/cam${CAM}.publisher.log"
+pub_run="$ROOT/cam${CAM}.publisher.sh"
 server_log="$ROOT/mediamtx.log"
 
 stop_cam() {
@@ -76,8 +77,8 @@ status() {
       echo "[rtsp] dead  $(basename "$f") pid=$pid"
     fi
   done
-  ip="$(ip -4 addr show wlan0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)"
-  [ -n "$ip" ] || ip="$(ip -4 addr show eth0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)"
+  ip="$(ip addr show wlan0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)"
+  [ -n "$ip" ] || ip="$(ip addr show eth0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)"
   [ -n "$ip" ] && echo "[rtsp] url=rtsp://$ip:8554/cam$CAM"
   echo "[rtsp] logs: $server_log $pub_log"
 }
@@ -133,30 +134,36 @@ paths:
 EOF
 
 if ! [ -f "$server_pid" ] || ! kill -0 "$(cat "$server_pid" 2>/dev/null)" 2>/dev/null; then
-  nohup "$MEDIAMTX" "$CONF" >"$server_log" 2>&1 &
+  : > "$server_log"
+  nohup "$MEDIAMTX" "$CONF" >"$server_log" 2>&1 </dev/null &
   echo $! > "$server_pid"
   sleep 1
 fi
 
 stop_cam
+: > "$pub_log"
 
 FPS="${RTSP_FPS:-10}"
 BITRATE="${RTSP_BITRATE:-900000}"
 WIDTH=1920
 HEIGHT=1080
 
-(
-  gst-launch-1.0 -q -e \
-    v4l2src device="/dev/video$CAM" io-mode=mmap \
-    ! video/x-raw,format=NV12,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 \
-    ! queue leaky=downstream max-size-buffers=2 \
-    ! mpph264enc bps=$BITRATE gop=$FPS header-mode=1 \
-    ! h264parse config-interval=1 \
-    ! filesink location=/dev/stdout 2>>"$pub_log" \
-  | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -re \
-      -f h264 -i pipe:0 -c:v copy -an \
-      -f rtsp -rtsp_transport tcp "rtsp://127.0.0.1:8554/cam$CAM" >>"$pub_log" 2>&1
-) &
+cat > "$pub_run" <<EOF
+#!/bin/sh
+gst-launch-1.0 -q -e \\
+  v4l2src device="/dev/video$CAM" io-mode=mmap \\
+  ! video/x-raw,format=NV12,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 \\
+  ! queue leaky=downstream max-size-buffers=2 \\
+  ! mpph264enc bps=$BITRATE gop=$FPS header-mode=1 \\
+  ! h264parse config-interval=1 \\
+  ! filesink location=/dev/stdout 2>>"$pub_log" \\
+| ffmpeg -hide_banner -loglevel warning -fflags nobuffer -re \\
+    -f h264 -i pipe:0 -c:v copy -an \\
+    -f rtsp -rtsp_transport tcp "rtsp://127.0.0.1:8554/cam$CAM" >>"$pub_log" 2>&1
+EOF
+chmod +x "$pub_run"
+
+nohup "$pub_run" >/dev/null 2>&1 </dev/null &
 echo $! > "$pub_pid"
 
 sleep 2
