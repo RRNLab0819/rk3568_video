@@ -65,6 +65,34 @@ Only one camera should be tested at a time in this probe.
 ./start_rtsp_probe.sh 0 stop-all
 ```
 
+## Three-Camera Push Probe
+
+This branch also has a separate outbound push script for testing three cameras
+against an external RTSP server:
+
+```sh
+cd /userdata
+./start_rtsp_3push.sh start
+./start_rtsp_3push.sh status
+./start_rtsp_3push.sh logs
+./start_rtsp_3push.sh stop-all
+```
+
+Default routes:
+
+```text
+cam0 -> rtsp://101.37.23.222:6002/live/hainandaxue/cam01
+cam1 -> rtsp://101.37.23.222:6002/live/hainandaxue/cam02
+cam2 -> rtsp://101.37.23.222:6002/live/hainandaxue/cam03
+```
+
+Defaults are intentionally conservative: 1920x1080, 10 fps, 800 kbps per
+camera, H.264, GOP 5. Override with environment variables if needed:
+
+```sh
+RTSP_FPS=8 RTSP_BITRATE=600000 ./start_rtsp_3push.sh start
+```
+
 ## Notes
 
 - The stable AI program must be stopped before running this probe because both
