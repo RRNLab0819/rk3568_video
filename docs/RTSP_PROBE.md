@@ -86,11 +86,26 @@ cam1 -> rtsp://101.37.23.222:6002/live/hainandaxue/cam02
 cam2 -> rtsp://101.37.23.222:6002/live/hainandaxue/cam03
 ```
 
-Defaults are intentionally conservative: 1920x1080, 10 fps, 800 kbps per
+Defaults are intentionally conservative: 1280x720, 8 fps, 500 kbps per
 camera, H.264, GOP 5. Override with environment variables if needed:
 
 ```sh
-RTSP_FPS=8 RTSP_BITRATE=600000 ./start_rtsp_3push.sh start
+RTSP_WIDTH=1920 RTSP_HEIGHT=1080 RTSP_FPS=10 RTSP_BITRATE=800000 ./start_rtsp_3push.sh start
+```
+
+The board image currently starts `/usr/bin/recovery`, which can consume a full
+CPU core. The three-camera script pauses that process with `SIGSTOP` while
+streaming and resumes it on `stop-all`. This does not modify system files.
+
+```sh
+./start_rtsp_3push.sh pause-recovery
+./start_rtsp_3push.sh resume-recovery
+```
+
+Disable the automatic pause if needed:
+
+```sh
+RTSP_PAUSE_RECOVERY=0 ./start_rtsp_3push.sh start
 ```
 
 ## Notes

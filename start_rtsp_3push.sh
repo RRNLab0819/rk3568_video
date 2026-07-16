@@ -8,12 +8,14 @@ URL0="rtsp://101.37.23.222:6002/live/hainandaxue/cam01"
 URL1="rtsp://101.37.23.222:6002/live/hainandaxue/cam02"
 URL2="rtsp://101.37.23.222:6002/live/hainandaxue/cam03"
 
-FPS="${RTSP_FPS:-10}"
-BITRATE="${RTSP_BITRATE:-800000}"
-WIDTH="${RTSP_WIDTH:-1920}"
-HEIGHT="${RTSP_HEIGHT:-1080}"
+FPS="${RTSP_FPS:-8}"
+BITRATE="${RTSP_BITRATE:-500000}"
+WIDTH="${RTSP_WIDTH:-1280}"
+HEIGHT="${RTSP_HEIGHT:-720}"
+PAUSE_RECOVERY="${RTSP_PAUSE_RECOVERY:-1}"
 
 mkdir -p "$ROOT"
+STATE="$ROOT/state.env"
 
 pid_file() {
   echo "$ROOT/cam$1.pid"
@@ -71,7 +73,34 @@ status_cam() {
   fi
 }
 
+pause_recovery() {
+  if [ "$PAUSE_RECOVERY" != "1" ]; then
+    return
+  fi
+  pid="$(pidof recovery 2>/dev/null || true)"
+  if [ -n "$pid" ]; then
+    kill -STOP "$pid" 2>/dev/null || true
+    echo "[3push] recovery paused pid=$pid"
+  fi
+}
+
+resume_recovery() {
+  pid="$(pidof recovery 2>/dev/null || true)"
+  if [ -n "$pid" ]; then
+    kill -CONT "$pid" 2>/dev/null || true
+    echo "[3push] recovery resumed pid=$pid"
+  fi
+}
+
+recovery_status() {
+  ps -o pid,stat,comm,args | grep recovery | grep -v grep || true
+}
+
 status() {
+  if [ -f "$STATE" ]; then
+    # shellcheck disable=SC1090
+    . "$STATE"
+  fi
   echo "[3push] fps=$FPS bitrate=$BITRATE size=${WIDTH}x${HEIGHT}"
   echo "[3push] cam0 -> $URL0"
   echo "[3push] cam1 -> $URL1"
@@ -79,6 +108,7 @@ status() {
   status_cam 0
   status_cam 1
   status_cam 2
+  recovery_status
 }
 
 start_cam() {
@@ -116,6 +146,14 @@ case "$ACTION" in
       echo "[3push] rk3568_camera is running; stop it before using camera devices"
       exit 1
     fi
+    pause_recovery
+    cat > "$STATE" <<EOF
+FPS=$FPS
+BITRATE=$BITRATE
+WIDTH=$WIDTH
+HEIGHT=$HEIGHT
+PAUSE_RECOVERY=$PAUSE_RECOVERY
+EOF
     if [ -x /userdata/start_rtsp_probe.sh ]; then
       /userdata/start_rtsp_probe.sh 0 stop-all >/dev/null 2>&1 || true
     fi
@@ -129,10 +167,19 @@ case "$ACTION" in
     ;;
   stop|stop-all)
     stop_all
+    resume_recovery
     status
     ;;
   status)
     status
+    ;;
+  pause-recovery)
+    pause_recovery
+    recovery_status
+    ;;
+  resume-recovery)
+    resume_recovery
+    recovery_status
     ;;
   logs)
     for cam in 0 1 2; do
@@ -141,7 +188,7 @@ case "$ACTION" in
     done
     ;;
   *)
-    echo "usage: $0 [start|stop|stop-all|status|logs]"
+    echo "usage: $0 [start|stop|stop-all|status|logs|pause-recovery|resume-recovery]"
     exit 2
     ;;
 esac
