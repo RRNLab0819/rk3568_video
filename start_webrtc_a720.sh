@@ -5,6 +5,7 @@ ROOT=/userdata/webrtc_a720
 MEDIAMTX="${MEDIAMTX_BIN:-/userdata/rtsp_probe/mediamtx}"
 CONF="$ROOT/mediamtx.yml"
 ACTION="${1:-start}"
+STATE="$ROOT/state.env"
 
 CAM="${WEBRTC_CAM:-0}"
 WIDTH="${WEBRTC_WIDTH:-1280}"
@@ -103,6 +104,10 @@ board_ip() {
 }
 
 status() {
+  if [ -f "$STATE" ]; then
+    # shellcheck disable=SC1090
+    . "$STATE"
+  fi
   ip="$(board_ip)"
   [ -n "$ip" ] || ip="127.0.0.1"
   echo "[webrtc-a720] cam$CAM -> rtsp://127.0.0.1:8554/$PATH_NAME"
@@ -138,6 +143,15 @@ case "$ACTION" in
     pause_recovery
     stop_stream
     start_server
+    cat > "$STATE" <<EOF
+CAM=$CAM
+WIDTH=$WIDTH
+HEIGHT=$HEIGHT
+FPS=$FPS
+BITRATE=$BITRATE
+PATH_NAME=$PATH_NAME
+PAUSE_RECOVERY=$PAUSE_RECOVERY
+EOF
     : > "$LOG"
     cat > "$RUN" <<EOF
 #!/bin/sh
