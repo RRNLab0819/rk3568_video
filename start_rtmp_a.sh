@@ -3,7 +3,7 @@ set -eu
 
 ROOT=/userdata/rtmp_a_probe
 ACTION="${1:-start}"
-URL="rtmp://push.fast.im/navigation/sn00001_a"
+URL="${RTMP_URL:-rtmp://push.fast.im/navigation/sn00001_a}"
 
 FPS="${RTMP_FPS:-25}"
 BITRATE="${RTMP_BITRATE:-2000000}"
