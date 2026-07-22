@@ -182,6 +182,68 @@ Override without editing the script:
 RTMP_CAM=1 RTMP_FPS=20 RTMP_BITRATE=1500000 ./start_rtmp_a.sh start
 ```
 
+## RTMP Single A 720p25 Probe
+
+Use this when you want a lower-latency single RTMP stream with lighter load than
+1080p:
+
+```sh
+cd /userdata
+./start_rtmp_a720.sh start
+./start_rtmp_a720.sh status
+./start_rtmp_a720.sh logs
+./start_rtmp_a720.sh stop-all
+```
+
+Default route and parameters:
+
+```text
+cam0 -> rtmp://push.fast.im/navigation/sn00001_a
+1280x720, 25 fps, 1 Mbps
+```
+
+Common edits do not require changing the file:
+
+```sh
+RTMP_CAM=1 ./start_rtmp_a720.sh start
+RTMP_BITRATE=1500000 ./start_rtmp_a720.sh start
+RTMP_URL=rtmp://push.fast.im/navigation/sn00001_b ./start_rtmp_a720.sh start
+```
+
+## WebRTC Single A 720p25 Probe
+
+Use this for a LAN browser latency probe. It publishes one raw camera stream
+into board-local MediaMTX, then MediaMTX serves it over WebRTC:
+
+```sh
+cd /userdata
+./start_webrtc_a720.sh start
+./start_webrtc_a720.sh status
+./start_webrtc_a720.sh logs
+./start_webrtc_a720.sh stop-all
+```
+
+The MediaMTX WebRTC endpoint is WHEP:
+
+```text
+http://<board-ip>:8889/cam0/whep
+```
+
+For browser viewing, open the repository file `webrtc_viewer.html` on the
+computer/VM and point it at the board. Typical test URL:
+
+```text
+file:///home/rrn/rk3568-camera/webrtc_viewer.html?host=192.168.2.54&path=cam0
+```
+
+Default parameters are `cam0`, 1280x720, 25 fps, 1 Mbps. Override them without
+editing the script:
+
+```sh
+WEBRTC_CAM=1 WEBRTC_PATH=cam1 ./start_webrtc_a720.sh start
+WEBRTC_BITRATE=1500000 ./start_webrtc_a720.sh start
+```
+
 ## Notes
 
 - The stable AI program must be stopped before running this probe because both
