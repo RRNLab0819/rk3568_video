@@ -108,6 +108,55 @@ Disable the automatic pause if needed:
 RTSP_PAUSE_RECOVERY=0 ./start_rtsp_3push.sh start
 ```
 
+## LAN Three-Camera Probe
+
+Use this to remove the cloud RTSP server from the latency test:
+
+```sh
+cd /userdata
+./start_rtsp_lan_3.sh start
+./start_rtsp_lan_3.sh status
+./start_rtsp_lan_3.sh stop-all
+```
+
+Default LAN URLs:
+
+```text
+rtsp://192.168.2.54:8554/cam0
+rtsp://192.168.2.54:8554/cam1
+rtsp://192.168.2.54:8554/cam2
+```
+
+The LAN probe uses the same conservative defaults as the cloud push probe:
+1280x720, 8 fps, 500 kbps per camera.
+
+## RTMP Three-Camera Push Probe
+
+Use this script to push three raw camera streams to the RTMP service:
+
+```sh
+cd /userdata
+./start_rtmp_3push.sh start
+./start_rtmp_3push.sh status
+./start_rtmp_3push.sh logs
+./start_rtmp_3push.sh stop-all
+```
+
+Default routes:
+
+```text
+cam0 -> rtmp://push.fast.im/navigation/sn00001_a
+cam1 -> rtmp://push.fast.im/navigation/sn00001_b
+cam2 -> rtmp://push.fast.im/navigation/sn00001_c
+```
+
+Default parameters are 1280x720, 8 fps, 500 kbps per camera. Override them
+without editing the script:
+
+```sh
+RTMP_WIDTH=1920 RTMP_HEIGHT=1080 RTMP_FPS=10 RTMP_BITRATE=800000 ./start_rtmp_3push.sh start
+```
+
 ## Notes
 
 - The stable AI program must be stopped before running this probe because both
