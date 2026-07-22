@@ -157,6 +157,31 @@ without editing the script:
 RTMP_WIDTH=1920 RTMP_HEIGHT=1080 RTMP_FPS=10 RTMP_BITRATE=800000 ./start_rtmp_3push.sh start
 ```
 
+## RTMP Single A Probe
+
+Use this for a higher-quality single-stream test to the `_a` route:
+
+```sh
+cd /userdata
+./start_rtmp_a.sh start
+./start_rtmp_a.sh status
+./start_rtmp_a.sh logs
+./start_rtmp_a.sh stop-all
+```
+
+Default route and parameters:
+
+```text
+cam0 -> rtmp://push.fast.im/navigation/sn00001_a
+1920x1080, 25 fps, 2 Mbps
+```
+
+Override without editing the script:
+
+```sh
+RTMP_CAM=1 RTMP_FPS=20 RTMP_BITRATE=1500000 ./start_rtmp_a.sh start
+```
+
 ## Notes
 
 - The stable AI program must be stopped before running this probe because both
