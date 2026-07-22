@@ -244,6 +244,40 @@ WEBRTC_CAM=1 WEBRTC_PATH=cam1 ./start_webrtc_a720.sh start
 WEBRTC_BITRATE=1500000 ./start_webrtc_a720.sh start
 ```
 
+## WebRTC Three-Camera 720p20 Probe
+
+Use this for three independent LAN browser streams:
+
+```sh
+cd /userdata
+./start_webrtc_3x720.sh start
+./start_webrtc_3x720.sh status
+./start_webrtc_3x720.sh logs
+./start_webrtc_3x720.sh stop-all
+```
+
+Defaults:
+
+```text
+cam0/cam1/cam2
+1280x720, 20 fps, 800 kbps per camera
+```
+
+Open the three viewer files on the VM/PC:
+
+```text
+/home/rrn/rk3568-camera/webrtc_cam0.html
+/home/rrn/rk3568-camera/webrtc_cam1.html
+/home/rrn/rk3568-camera/webrtc_cam2.html
+```
+
+You can tune all three streams without editing the script:
+
+```sh
+WEBRTC_FPS=20 WEBRTC_BITRATE=600000 ./start_webrtc_3x720.sh start
+WEBRTC_FPS=20 WEBRTC_BITRATE=1000000 ./start_webrtc_3x720.sh start
+```
+
 ## Notes
 
 - The stable AI program must be stopped before running this probe because both
