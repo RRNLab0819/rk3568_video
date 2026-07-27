@@ -15,17 +15,17 @@ H.264 MP4 segments
 record directories:
 
 ```text
-/mnt/sdcard/rk3568_recordings/cam0/YYYY-MM-DD/HH-MM-SS.mp4
-/mnt/sdcard/rk3568_recordings/cam1/YYYY-MM-DD/HH-MM-SS.mp4
+/mnt/sdcard/rk3568_recordings/cam0/YYYY-MM-DD/HH-MM-SS_HH-MM-SS.mp4
+/mnt/sdcard/rk3568_recordings/cam1/YYYY-MM-DD/HH-MM-SS_HH-MM-SS.mp4
 ```
 
-Each segment is named with its own Beijing-time start second. For example, a
-60-second split sequence looks like:
+Each segment is named with its own Beijing-time start and expected end second.
+For example, a 60-second split sequence looks like:
 
 ```text
-13-24-59.mp4
-13-25-59.mp4
-13-26-59.mp4
+13-24-59_13-25-59.mp4
+13-25-59_13-26-59.mp4
+13-26-59_13-27-59.mp4
 ```
 
 The board currently runs in UTC, so the recorder sets `HDMI_REC_TZ=CST-8` by

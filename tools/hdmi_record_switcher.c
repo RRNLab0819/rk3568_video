@@ -13,8 +13,10 @@
 #include <unistd.h>
 
 typedef struct {
-  char dir[512];
-  char stem[64];
+  char root[512];
+  int cam;
+  int segment_sec;
+  char latest[512];
 } PathPattern;
 
 typedef struct {
@@ -191,11 +193,27 @@ static gchar *on_format_location(GstElement *splitmux, guint fragment_id, gpoint
   (void)splitmux;
   (void)fragment_id;
   PathPattern *pattern = (PathPattern *)user_data;
-  time_t now = time(NULL);
-  struct tm tmv;
-  localtime_r(&now, &tmv);
-  strftime(pattern->stem, sizeof(pattern->stem), "%H-%M-%S", &tmv);
-  return g_strdup_printf("%s/%s.mp4", pattern->dir, pattern->stem);
+  time_t start = time(NULL);
+  time_t end = start + pattern->segment_sec;
+  struct tm start_tm;
+  struct tm end_tm;
+  char date_dir[32];
+  char start_name[32];
+  char end_name[32];
+  char dir[512];
+
+  localtime_r(&start, &start_tm);
+  localtime_r(&end, &end_tm);
+  strftime(date_dir, sizeof(date_dir), "%Y-%m-%d", &start_tm);
+  strftime(start_name, sizeof(start_name), "%H-%M-%S", &start_tm);
+  strftime(end_name, sizeof(end_name), "%H-%M-%S", &end_tm);
+
+  snprintf(dir, sizeof(dir), "%s/cam%d/%s", pattern->root, pattern->cam, date_dir);
+  if (mkdir_p(dir) != 0) {
+    fprintf(stderr, "[record] cannot create output dir: %s\n", dir);
+  }
+  snprintf(pattern->latest, sizeof(pattern->latest), "%s/%s_%s.mp4", dir, start_name, end_name);
+  return g_strdup(pattern->latest);
 }
 
 static void open_event_devices(App *app, const char *event_devs) {
@@ -242,11 +260,16 @@ int main(int argc, char **argv) {
   }
 
   time_t now = time(NULL);
+  time_t initial_end = now + segment_sec;
   struct tm tmv;
+  struct tm end_tmv;
   localtime_r(&now, &tmv);
+  localtime_r(&initial_end, &end_tmv);
   char date_dir[32], time_name[32];
+  char end_time_name[32];
   strftime(date_dir, sizeof(date_dir), "%Y-%m-%d", &tmv);
   strftime(time_name, sizeof(time_name), "%H-%M-%S", &tmv);
+  strftime(end_time_name, sizeof(end_time_name), "%H-%M-%S", &end_tmv);
 
   char dir0[512], dir1[512];
   snprintf(dir0, sizeof(dir0), "%s/cam0/%s", root, date_dir);
@@ -257,10 +280,14 @@ int main(int argc, char **argv) {
   }
   PathPattern pattern0;
   PathPattern pattern1;
-  snprintf(pattern0.dir, sizeof(pattern0.dir), "%s", dir0);
-  snprintf(pattern1.dir, sizeof(pattern1.dir), "%s", dir1);
-  snprintf(pattern0.stem, sizeof(pattern0.stem), "%s", time_name);
-  snprintf(pattern1.stem, sizeof(pattern1.stem), "%s", time_name);
+  memset(&pattern0, 0, sizeof(pattern0));
+  memset(&pattern1, 0, sizeof(pattern1));
+  snprintf(pattern0.root, sizeof(pattern0.root), "%s", root);
+  snprintf(pattern1.root, sizeof(pattern1.root), "%s", root);
+  pattern0.cam = 0;
+  pattern1.cam = 1;
+  pattern0.segment_sec = segment_sec;
+  pattern1.segment_sec = segment_sec;
 
   int margin_x = width * (100 - crop_percent) / 200;
   int margin_y = height * (100 - crop_percent) / 200;
@@ -305,8 +332,8 @@ int main(int argc, char **argv) {
   app.pad1 = gst_element_get_static_pad(app.selector, "sink_1");
   g_signal_connect(mux0, "format-location", G_CALLBACK(on_format_location), &pattern0);
   g_signal_connect(mux1, "format-location", G_CALLBACK(on_format_location), &pattern1);
-  snprintf(app.latest0, sizeof(app.latest0), "%s/%s.mp4", dir0, time_name);
-  snprintf(app.latest1, sizeof(app.latest1), "%s/%s.mp4", dir1, time_name);
+  snprintf(app.latest0, sizeof(app.latest0), "%s/%s_%s.mp4", dir0, time_name, end_time_name);
+  snprintf(app.latest1, sizeof(app.latest1), "%s/%s_%s.mp4", dir1, time_name, end_time_name);
 
   app.loop = g_main_loop_new(NULL, FALSE);
   GstBus *bus = gst_element_get_bus(app.pipeline);
@@ -325,8 +352,8 @@ int main(int argc, char **argv) {
   g_timeout_add(200, check_signal, &app);
 
   fprintf(stderr, "[record] timezone: %s\n", getenv("TZ") ? getenv("TZ") : "");
-  fprintf(stderr, "[record] cam0 -> %s/%s.mp4\n", pattern0.dir, pattern0.stem);
-  fprintf(stderr, "[record] cam1 -> %s/%s.mp4\n", pattern1.dir, pattern1.stem);
+  fprintf(stderr, "[record] cam0 -> %s/cam0/%s/<start>_<end>.mp4\n", pattern0.root, date_dir);
+  fprintf(stderr, "[record] cam1 -> %s/cam1/%s/<start>_<end>.mp4\n", pattern1.root, date_dir);
   fprintf(stderr, "[record] HDMI keys: 1=cam0 2=cam1 3=latest paths q=quit\n");
 
   switch_to(&app, 0);
