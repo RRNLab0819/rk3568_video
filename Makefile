@@ -33,7 +33,7 @@ CXXSRCS  := inference.cc postprocess.cc
 OBJS     := $(patsubst %.c, build/%.o, $(CSRCS)) $(patsubst %.cc, build/%.o, $(CXXSRCS))
 TARGET   := rk3568_camera
 
-.PHONY: all clean push deploy
+.PHONY: all clean push deploy hdmi_record_switcher
 
 all: build $(TARGET)
 
@@ -52,7 +52,18 @@ build/%.o: $(SRCDIR)/%.cc
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -rf build $(TARGET)
+	rm -rf build $(TARGET) tools/hdmi_record_switcher
+
+hdmi_record_switcher:
+	$(CC) $(CFLAGS) tools/hdmi_record_switcher.c -o tools/hdmi_record_switcher \
+		$(LDFLAGS) \
+		-L$(SYSROOT)/usr/lib \
+		-I$(SYSROOT)/usr/include/gstreamer-1.0 \
+		-I$(SYSROOT)/usr/include/glib-2.0 \
+		-I$(SYSROOT)/usr/lib/glib-2.0/include \
+		-lgstreamer-1.0 -lgobject-2.0 -lglib-2.0
+	$(STRIP) --strip-unneeded tools/hdmi_record_switcher 2>/dev/null || true
+	@echo "=== Build OK: tools/hdmi_record_switcher ==="
 
 # Push to device via ADB
 push: $(TARGET) tools/isolated_yolov5_test
