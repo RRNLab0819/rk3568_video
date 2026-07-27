@@ -13,7 +13,7 @@ WIDTH="${WEBRTC_WIDTH:-1280}"
 HEIGHT="${WEBRTC_HEIGHT:-720}"
 FPS="${WEBRTC_FPS:-25}"
 BITRATE="${WEBRTC_BITRATE:-1500000}"
-GOP="${WEBRTC_GOP:-10}"
+GOP="${WEBRTC_GOP:-25}"
 PAUSE_RECOVERY="${WEBRTC_PAUSE_RECOVERY:-1}"
 
 mkdir -p "$ROOT"
@@ -54,10 +54,16 @@ kill_pid_file() {
 
 stop_camera_streams() {
   kill_pid_file "$PID"
+  for p in $(fuser "/dev/video$CAM" 2>/dev/null || true); do
+    kill "$p" 2>/dev/null || true
+  done
   for p in $(ps -o pid,args | awk '/gst-launch-1.0|ffmpeg/ && /device=\/dev\/video|rtsp:\/\/127.0.0.1:8554/ {print $1}'); do
     kill "$p" 2>/dev/null || true
   done
   sleep 1
+  for p in $(fuser "/dev/video$CAM" 2>/dev/null || true); do
+    kill -9 "$p" 2>/dev/null || true
+  done
   for p in $(ps -o pid,args | awk '/gst-launch-1.0|ffmpeg/ && /device=\/dev\/video|rtsp:\/\/127.0.0.1:8554/ {print $1}'); do
     kill -9 "$p" 2>/dev/null || true
   done
@@ -161,8 +167,8 @@ case "$ACTION" in
 gst-launch-1.0 -q -e \\
   v4l2src device="/dev/video$CAM" io-mode=mmap \\
   ! video/x-raw,format=NV12,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 \\
-  ! queue max-size-buffers=8 max-size-time=0 max-size-bytes=0 \\
-  ! mpph264enc bps=$BITRATE bps-min=$BITRATE bps-max=$BITRATE rc-mode=cbr profile=baseline gop=$GOP header-mode=1 \\
+  ! queue leaky=downstream max-size-buffers=3 max-size-time=0 max-size-bytes=0 \\
+  ! mpph264enc bps=$BITRATE rc-mode=cbr gop=$GOP header-mode=1 \\
   ! h264parse config-interval=1 \\
   ! filesink location=/dev/stdout 2>>"$LOG" \\
 | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -use_wallclock_as_timestamps 1 \\
