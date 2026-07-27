@@ -16,6 +16,7 @@ typedef struct {
   char root[512];
   int cam;
   int segment_sec;
+  time_t base_time;
   char latest[512];
 } PathPattern;
 
@@ -25,6 +26,7 @@ typedef struct {
   GstPad *pad0;
   GstPad *pad1;
   GMainLoop *loop;
+  gboolean eos_sent;
   int evfds[16];
   int evfd_count;
   int stdin_fd;
@@ -114,6 +116,13 @@ static void switch_to(App *app, int cam) {
   fprintf(stderr, "[switch] HDMI cam%d\n", cam);
 }
 
+static void request_stop(App *app) {
+  if (app->eos_sent) return;
+  app->eos_sent = TRUE;
+  fprintf(stderr, "[record] stopping, finalizing MP4 files...\n");
+  gst_element_send_event(app->pipeline, gst_event_new_eos());
+}
+
 static void print_playback(App *app) {
   fprintf(stderr, "[playback] latest cam0: %s\n", app->latest0[0] ? app->latest0 : "(none yet)");
   fprintf(stderr, "[playback] latest cam1: %s\n", app->latest1[0] ? app->latest1 : "(none yet)");
@@ -130,7 +139,7 @@ static gboolean on_io(GIOChannel *source, GIOCondition cond, gpointer data) {
     else if (ch == '2') switch_to(app, 1);
     else if (ch == '3') print_playback(app);
     else if (ch == 'q' || ch == 'Q') {
-      g_main_loop_quit(app->loop);
+      request_stop(app);
       return FALSE;
     }
   }
@@ -149,7 +158,7 @@ static gboolean on_event(GIOChannel *source, GIOCondition cond, gpointer data) {
     else if (ev.code == KEY_2 || ev.code == KEY_KP2) switch_to(app, 1);
     else if (ev.code == KEY_3 || ev.code == KEY_KP3) print_playback(app);
     else if (ev.code == KEY_Q || ev.code == KEY_ESC) {
-      g_main_loop_quit(app->loop);
+      request_stop(app);
       return FALSE;
     }
   }
@@ -159,8 +168,7 @@ static gboolean on_event(GIOChannel *source, GIOCondition cond, gpointer data) {
 static gboolean check_signal(gpointer data) {
   App *app = (App *)data;
   if (g_stop) {
-    g_main_loop_quit(app->loop);
-    return FALSE;
+    request_stop(app);
   }
   return TRUE;
 }
@@ -193,7 +201,7 @@ static gchar *on_format_location(GstElement *splitmux, guint fragment_id, gpoint
   (void)splitmux;
   (void)fragment_id;
   PathPattern *pattern = (PathPattern *)user_data;
-  time_t start = time(NULL);
+  time_t start = pattern->base_time + (time_t)fragment_id * pattern->segment_sec;
   time_t end = start + pattern->segment_sec;
   struct tm start_tm;
   struct tm end_tm;
@@ -288,6 +296,8 @@ int main(int argc, char **argv) {
   pattern1.cam = 1;
   pattern0.segment_sec = segment_sec;
   pattern1.segment_sec = segment_sec;
+  pattern0.base_time = now;
+  pattern1.base_time = now;
 
   int margin_x = width * (100 - crop_percent) / 200;
   int margin_y = height * (100 - crop_percent) / 200;
@@ -360,8 +370,6 @@ int main(int argc, char **argv) {
   gst_element_set_state(app.pipeline, GST_STATE_PLAYING);
   g_main_loop_run(app.loop);
 
-  fprintf(stderr, "[record] stopping, finalizing MP4 files...\n");
-  gst_element_send_event(app.pipeline, gst_event_new_eos());
   gst_element_set_state(app.pipeline, GST_STATE_NULL);
   restore_stdin(&app);
   for (int i = 0; i < app.evfd_count; ++i) close(app.evfds[i]);

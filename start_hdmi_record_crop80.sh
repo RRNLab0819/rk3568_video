@@ -100,7 +100,11 @@ kill_pid_file() {
   pid="$(cat "$pf" 2>/dev/null || true)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill -INT "$pid" 2>/dev/null || true
-    sleep 3
+    i=0
+    while [ "$i" -lt 20 ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 1
+      i=$((i + 1))
+    done
   fi
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
@@ -115,7 +119,11 @@ kill_pid_file() {
 stop_camera_users() {
   kill_pid_file "$PID"
   pkill -INT hdmi_record_switcher 2>/dev/null || true
-  sleep 2
+  i=0
+  while [ "$i" -lt 20 ] && pgrep hdmi_record_switcher >/dev/null 2>&1; do
+    sleep 1
+    i=$((i + 1))
+  done
   pkill -TERM hdmi_record_switcher 2>/dev/null || true
   pkill -TERM rk3568_camera 2>/dev/null || true
   pkill -f start_webrtc_single.sh 2>/dev/null || true

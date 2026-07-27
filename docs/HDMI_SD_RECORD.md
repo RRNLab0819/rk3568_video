@@ -28,6 +28,10 @@ For example, a 60-second split sequence looks like:
 13-26-59_13-27-59.mp4
 ```
 
+The file currently being written may not be readable until the segment closes,
+because MP4 metadata is finalized at segment end. For playback or upload, read
+completed previous segments, or stop the recorder cleanly first.
+
 The board currently runs in UTC, so the recorder sets `HDMI_REC_TZ=CST-8` by
 default for file naming. `CST-8` is POSIX timezone syntax for China Standard
 Time, UTC+8. The system clock does not need to be changed for names to use
