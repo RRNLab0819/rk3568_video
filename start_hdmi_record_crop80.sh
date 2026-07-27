@@ -59,33 +59,38 @@ ensure_record_dir() {
   rm -f "$out/.write_test"
 }
 
-detect_keyboard_event() {
-  for mode in strict fallback; do
-    name=""
-    while IFS= read -r line; do
-      case "$line" in
-        N:\ Name=*) name="$line" ;;
-        H:\ Handlers=*)
-          match=0
-          case "$mode:$name" in
-            strict:*Keyboard*) match=1 ;;
-            fallback:*SONiX\ USB\ DEVICE*|fallback:*USB\ DEVICE*|fallback:*SEMICO*|fallback:*Logitech*|fallback:*2.4G*) match=1 ;;
+detect_keyboard_events() {
+  name=""
+  events=""
+  while IFS= read -r line; do
+    case "$line" in
+      N:\ Name=*) name="$line" ;;
+      H:\ Handlers=*)
+        match=0
+        case "$name" in
+          *Keyboard*|*SONiX\ USB\ DEVICE*|*USB\ DEVICE*|*SEMICO*|*Logitech*|*2.4G*) match=1 ;;
+        esac
+        if [ "$match" = "1" ]; then
+          case "$line" in
+            *kbd*event*)
+              for tok in $line; do
+                case "$tok" in
+                  event*)
+                    dev="/dev/input/$tok"
+                    case " $events " in
+                      *" $dev "*) ;;
+                      *) events="${events:+$events }$dev" ;;
+                    esac
+                    ;;
+                esac
+              done
+              ;;
           esac
-          if [ "$match" = "1" ]; then
-            case "$line" in
-              *kbd*event*)
-                for tok in $line; do
-                  case "$tok" in
-                    event*) echo "/dev/input/$tok"; return 0 ;;
-                  esac
-                done
-                ;;
-            esac
-          fi
-          ;;
-      esac
-    done < /proc/bus/input/devices
-  done
+        fi
+        ;;
+    esac
+  done < /proc/bus/input/devices
+  echo "$events"
   return 0
 }
 
@@ -202,7 +207,7 @@ start_recording() {
 
     EVENT_ARG="${HDMI_REC_EVENT:-}"
     if [ -z "$EVENT_ARG" ]; then
-      EVENT_ARG="$(detect_keyboard_event)"
+      EVENT_ARG="$(detect_keyboard_events)"
     fi
     if [ -n "$EVENT_ARG" ]; then
       echo "[record] keyboard event: $EVENT_ARG"

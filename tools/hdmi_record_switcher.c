@@ -23,7 +23,8 @@ typedef struct {
   GstPad *pad0;
   GstPad *pad1;
   GMainLoop *loop;
-  int evfd;
+  int evfds[16];
+  int evfd_count;
   int stdin_fd;
   struct termios old_termios;
   gboolean termios_set;
@@ -136,14 +137,15 @@ static gboolean on_io(GIOChannel *source, GIOCondition cond, gpointer data) {
 
 static gboolean on_event(GIOChannel *source, GIOCondition cond, gpointer data) {
   App *app = (App *)data;
-  (void)source;
   if (cond & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) return TRUE;
+  int fd = g_io_channel_unix_get_fd(source);
   struct input_event ev;
-  while (read(app->evfd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+  while (read(fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
     if (ev.type != EV_KEY || ev.value != 1) continue;
-    if (ev.code == KEY_1) switch_to(app, 0);
-    else if (ev.code == KEY_2) switch_to(app, 1);
-    else if (ev.code == KEY_3) print_playback(app);
+    fprintf(stderr, "[input] key code=%u\n", ev.code);
+    if (ev.code == KEY_1 || ev.code == KEY_KP1) switch_to(app, 0);
+    else if (ev.code == KEY_2 || ev.code == KEY_KP2) switch_to(app, 1);
+    else if (ev.code == KEY_3 || ev.code == KEY_KP3) print_playback(app);
     else if (ev.code == KEY_Q || ev.code == KEY_ESC) {
       g_main_loop_quit(app->loop);
       return FALSE;
@@ -187,11 +189,32 @@ static gboolean on_bus(GstBus *bus, GstMessage *msg, gpointer data) {
 
 static gchar *on_format_location(GstElement *splitmux, guint fragment_id, gpointer user_data) {
   (void)splitmux;
+  (void)fragment_id;
   PathPattern *pattern = (PathPattern *)user_data;
-  if (fragment_id == 0) {
-    return g_strdup_printf("%s/%s.mp4", pattern->dir, pattern->stem);
+  time_t now = time(NULL);
+  struct tm tmv;
+  localtime_r(&now, &tmv);
+  strftime(pattern->stem, sizeof(pattern->stem), "%H-%M-%S", &tmv);
+  return g_strdup_printf("%s/%s.mp4", pattern->dir, pattern->stem);
+}
+
+static void open_event_devices(App *app, const char *event_devs) {
+  if (!event_devs || !*event_devs) return;
+
+  char buf[512];
+  snprintf(buf, sizeof(buf), "%s", event_devs);
+  for (char *tok = strtok(buf, " ,:;"); tok && app->evfd_count < 16; tok = strtok(NULL, " ,:;")) {
+    int fd = open(tok, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+      fprintf(stderr, "[input] cannot open %s: %s\n", tok, strerror(errno));
+      continue;
+    }
+    app->evfds[app->evfd_count++] = fd;
+    GIOChannel *ev_ch = g_io_channel_unix_new(fd);
+    g_io_add_watch(ev_ch, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL, on_event, app);
+    g_io_channel_unref(ev_ch);
+    fprintf(stderr, "[input] reading %s\n", tok);
   }
-  return g_strdup_printf("%s/%s_%05u.mp4", pattern->dir, pattern->stem, fragment_id);
 }
 
 int main(int argc, char **argv) {
@@ -282,8 +305,8 @@ int main(int argc, char **argv) {
   app.pad1 = gst_element_get_static_pad(app.selector, "sink_1");
   g_signal_connect(mux0, "format-location", G_CALLBACK(on_format_location), &pattern0);
   g_signal_connect(mux1, "format-location", G_CALLBACK(on_format_location), &pattern1);
-  snprintf(app.latest0, sizeof(app.latest0), "%s/%s_00000.mp4", dir0, time_name);
-  snprintf(app.latest1, sizeof(app.latest1), "%s/%s_00000.mp4", dir1, time_name);
+  snprintf(app.latest0, sizeof(app.latest0), "%s/%s.mp4", dir0, time_name);
+  snprintf(app.latest1, sizeof(app.latest1), "%s/%s.mp4", dir1, time_name);
 
   app.loop = g_main_loop_new(NULL, FALSE);
   GstBus *bus = gst_element_get_bus(app.pipeline);
@@ -295,18 +318,7 @@ int main(int argc, char **argv) {
   g_io_add_watch(stdin_ch, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL, on_io, &app);
   g_io_channel_unref(stdin_ch);
 
-  app.evfd = -1;
-  if (event_dev[0]) {
-    app.evfd = open(event_dev, O_RDONLY | O_NONBLOCK);
-    if (app.evfd >= 0) {
-      GIOChannel *ev_ch = g_io_channel_unix_new(app.evfd);
-      g_io_add_watch(ev_ch, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL, on_event, &app);
-      g_io_channel_unref(ev_ch);
-      fprintf(stderr, "[input] reading %s\n", event_dev);
-    } else {
-      fprintf(stderr, "[input] cannot open %s: %s\n", event_dev, strerror(errno));
-    }
-  }
+  open_event_devices(&app, event_dev);
 
   signal(SIGINT, on_signal);
   signal(SIGTERM, on_signal);
@@ -325,7 +337,7 @@ int main(int argc, char **argv) {
   gst_element_send_event(app.pipeline, gst_event_new_eos());
   gst_element_set_state(app.pipeline, GST_STATE_NULL);
   restore_stdin(&app);
-  if (app.evfd >= 0) close(app.evfd);
+  for (int i = 0; i < app.evfd_count; ++i) close(app.evfds[i]);
   if (app.pad0) gst_object_unref(app.pad0);
   if (app.pad1) gst_object_unref(app.pad1);
   if (app.selector) gst_object_unref(app.selector);

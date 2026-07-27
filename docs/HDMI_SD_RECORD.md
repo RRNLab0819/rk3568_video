@@ -19,6 +19,15 @@ record directories:
 /mnt/sdcard/rk3568_recordings/cam1/YYYY-MM-DD/HH-MM-SS.mp4
 ```
 
+Each segment is named with its own Beijing-time start second. For example, a
+60-second split sequence looks like:
+
+```text
+13-24-59.mp4
+13-25-59.mp4
+13-26-59.mp4
+```
+
 The board currently runs in UTC, so the recorder sets `HDMI_REC_TZ=CST-8` by
 default for file naming. `CST-8` is POSIX timezone syntax for China Standard
 Time, UTC+8. The system clock does not need to be changed for names to use
