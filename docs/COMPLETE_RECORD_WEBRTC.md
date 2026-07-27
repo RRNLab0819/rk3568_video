@@ -7,6 +7,7 @@ cam0/cam1 V4L2 -> center 80% crop -> HDMI switch display
                               -> one H.264 encoder per camera
                               -> MP4 segments on SD card
                               -> WebRTC preview through MediaMTX
+                              -> media-server web UI for live/history access
 ```
 
 The important point is that `/dev/video0` and `/dev/video1` are opened only
@@ -30,6 +31,7 @@ WebRTC viewer cam0: http://<board-ip>:8889/cam0/
 WebRTC viewer cam1: http://<board-ip>:8889/cam1/
 WHEP API cam0: http://<board-ip>:8889/cam0/whep
 WHEP API cam1: http://<board-ip>:8889/cam1/whep
+media-server UI: http://<board-ip>:8866
 ```
 
 The current default is 1920x1080 at 15 fps, 4 Mbps per camera, center 80% crop,
@@ -44,6 +46,8 @@ preserving a usable local display and network preview.
 
 Always stop cleanly before removing the SD card. MP4 metadata is finalized when
 a segment closes or when the recorder receives the stop signal.
+
+Stop order is `media-server -> recorder -> MediaMTX`.
 
 ## Status And Logs
 
@@ -84,8 +88,22 @@ MEDIAMTX_BIN=/userdata/webrtc_single/mediamtx ./start_complete_work.sh start
   MP4 splitting, and optional WebRTC pipe output.
 - `start_hdmi_record_crop80.sh`: stable HDMI + SD recorder control script.
 - `start_complete_work.sh`: starts MediaMTX and then starts the recorder with
-  `HDMI_REC_WEBRTC=1`.
+  `HDMI_REC_WEBRTC=1`, then starts `/userdata/media-server/media-server-arm64
+  -config configs/config.yaml`.
 - `webrtc_single_viewer.html`: browser helper page for WHEP playback.
+
+## Time Guard
+
+The board can briefly boot with an old default clock, such as 2017, before NTP
+updates it. `start_complete_work.sh` waits until `date +%Y` is at least 2026
+before recording starts. This prevents new MP4 files from being created under a
+wrong date directory.
+
+Debug override:
+
+```sh
+COMPLETE_TIME_MIN_YEAR=1970 ./start_complete_work.sh start
+```
 
 ## Notes
 
