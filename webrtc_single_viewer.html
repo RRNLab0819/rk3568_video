@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RK3568 WebRTC Live</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0f14;
+      --panel: #151b22;
+      --line: #2a333d;
+      --text: #eef4f8;
+      --muted: #8ea1b2;
+      --accent: #2f80ed;
+      --ok: #35c46a;
+      --warn: #f2b84b;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+    }
+    body {
+      display: grid;
+      grid-template-rows: 52px 1fr;
+      overflow: hidden;
+    }
+    header {
+      display: grid;
+      grid-template-columns: auto minmax(300px, 1fr) auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 9px 12px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+    }
+    .brand {
+      font-weight: 700;
+      letter-spacing: .2px;
+      white-space: nowrap;
+    }
+    input {
+      width: 100%;
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: #0f141a;
+      color: var(--text);
+      padding: 0 10px;
+      font-size: 14px;
+      outline: none;
+    }
+    button {
+      height: 34px;
+      border: 1px solid #3d89e9;
+      border-radius: 4px;
+      background: var(--accent);
+      color: white;
+      padding: 0 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button.secondary {
+      border-color: var(--line);
+      background: #202832;
+    }
+    #status {
+      min-width: 120px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: right;
+    }
+    main {
+      position: relative;
+      min-height: 0;
+      background: #000;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+      display: block;
+    }
+    .hint {
+      position: absolute;
+      left: 14px;
+      bottom: 12px;
+      padding: 6px 8px;
+      border-radius: 4px;
+      background: rgba(8, 12, 16, .74);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .stats {
+      position: absolute;
+      right: 14px;
+      bottom: 12px;
+      min-width: 260px;
+      padding: 8px 10px;
+      border-radius: 4px;
+      background: rgba(8, 12, 16, .78);
+      color: #c5d1dc;
+      font: 12px/1.5 Consolas, monospace;
+      white-space: pre;
+      text-align: right;
+    }
+    @media (max-width: 720px) {
+      body { grid-template-rows: auto 1fr; }
+      header { grid-template-columns: 1fr; }
+      #status { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">RK3568 Live</div>
+    <input id="url" value="http://192.168.2.54:8889/cam0/whep" spellcheck="false">
+    <button id="connect">Connect</button>
+    <button id="disconnect" class="secondary">Disconnect</button>
+    <div id="status">idle</div>
+  </header>
+  <main>
+    <video id="video" autoplay playsinline muted controls></video>
+    <div class="hint">LAN WebRTC preview, H.264 via MediaMTX WHEP</div>
+    <div id="stats" class="stats">stats waiting</div>
+  </main>
+
+  <script>
+    const urlInput = document.getElementById("url");
+    const video = document.getElementById("video");
+    const statusEl = document.getElementById("status");
+    const statsEl = document.getElementById("stats");
+    let pc = null;
+    let statsTimer = null;
+    let lastDecoded = 0;
+    let lastDropped = 0;
+    let lastTs = performance.now();
+
+    const params = new URLSearchParams(location.search);
+    const host = params.get("host");
+    const path = params.get("path") || "cam0";
+    if (host) {
+      urlInput.value = `http://${host}:8889/${path}/whep`;
+    }
+
+    function setStatus(text, tone = "") {
+      statusEl.textContent = text;
+      statusEl.style.color = tone === "ok" ? "var(--ok)" : tone === "warn" ? "var(--warn)" : "var(--muted)";
+    }
+
+    async function waitIceGatheringComplete(peer) {
+      if (peer.iceGatheringState === "complete") return;
+      await new Promise((resolve) => {
+        const onChange = () => {
+          if (peer.iceGatheringState === "complete") {
+            peer.removeEventListener("icegatheringstatechange", onChange);
+            resolve();
+          }
+        };
+        peer.addEventListener("icegatheringstatechange", onChange);
+      });
+    }
+
+    async function connect() {
+      disconnect();
+      setStatus("connecting");
+      pc = new RTCPeerConnection({ iceServers: [] });
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.ontrack = (event) => {
+        video.srcObject = event.streams[0];
+        setStatus("playing", "ok");
+      };
+      pc.onconnectionstatechange = () => {
+        if (!pc) return;
+        const state = pc.connectionState;
+        setStatus(state, state === "connected" ? "ok" : state === "failed" ? "warn" : "");
+      };
+      statsTimer = setInterval(updateStats, 1000);
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitIceGatheringComplete(pc);
+
+      const response = await fetch(urlInput.value, {
+        method: "POST",
+        headers: { "Content-Type": "application/sdp" },
+        body: pc.localDescription.sdp
+      });
+      if (!response.ok) {
+        throw new Error(`WHEP ${response.status}: ${await response.text()}`);
+      }
+      await pc.setRemoteDescription({
+        type: "answer",
+        sdp: await response.text()
+      });
+    }
+
+    function disconnect() {
+      if (statsTimer) {
+        clearInterval(statsTimer);
+        statsTimer = null;
+      }
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      video.srcObject = null;
+      statsEl.textContent = "stats waiting";
+      lastDecoded = 0;
+      lastDropped = 0;
+      lastTs = performance.now();
+      setStatus("idle");
+    }
+
+    async function updateStats() {
+      if (!pc) return;
+      let framesDecoded = 0;
+      let framesDropped = 0;
+      let jitterMs = 0;
+      let packetsLost = 0;
+      let packetsReceived = 0;
+
+      const quality = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+      if (quality) {
+        framesDecoded = quality.totalVideoFrames || 0;
+        framesDropped = quality.droppedVideoFrames || 0;
+      }
+
+      const report = await pc.getStats();
+      report.forEach((item) => {
+        if (item.type === "inbound-rtp" && item.kind === "video") {
+          framesDecoded = item.framesDecoded || framesDecoded;
+          framesDropped = item.framesDropped || framesDropped;
+          jitterMs = item.jitter ? item.jitter * 1000 : 0;
+          packetsLost = item.packetsLost || 0;
+          packetsReceived = item.packetsReceived || 0;
+        }
+      });
+
+      const now = performance.now();
+      const seconds = Math.max((now - lastTs) / 1000, 0.001);
+      const fps = (framesDecoded - lastDecoded) / seconds;
+      const droppedDelta = framesDropped - lastDropped;
+      lastDecoded = framesDecoded;
+      lastDropped = framesDropped;
+      lastTs = now;
+
+      statsEl.textContent =
+        `fps ${fps.toFixed(1)}  dropped +${droppedDelta}\n` +
+        `decoded ${framesDecoded}  dropped ${framesDropped}\n` +
+        `jitter ${jitterMs.toFixed(1)} ms  lost ${packetsLost}\n` +
+        `packets ${packetsReceived}`;
+    }
+
+    document.getElementById("connect").addEventListener("click", () => {
+      connect().catch((error) => setStatus(error.message, "warn"));
+    });
+    document.getElementById("disconnect").addEventListener("click", disconnect);
+  </script>
+</body>
+</html>
