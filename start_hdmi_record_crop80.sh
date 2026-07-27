@@ -59,19 +59,33 @@ ensure_record_dir() {
 }
 
 detect_keyboard_event() {
-  awk '
-    /^N: Name=/ { name=$0 }
-    /^H: Handlers=/ {
-      if (name ~ /[Kk]eyboard|USB.*[Kk]ey|SEMICO|Logitech|2.4G/ && $0 ~ /event[0-9]+/) {
-        for (i = 1; i <= NF; i++) {
-          if ($i ~ /^event[0-9]+$/) {
-            print "/dev/input/" $i
-            exit
-          }
-        }
-      }
-    }
-  ' /proc/bus/input/devices 2>/dev/null || true
+  for mode in strict fallback; do
+    name=""
+    while IFS= read -r line; do
+      case "$line" in
+        N:\ Name=*) name="$line" ;;
+        H:\ Handlers=*)
+          match=0
+          case "$mode:$name" in
+            strict:*Keyboard*) match=1 ;;
+            fallback:*SONiX\ USB\ DEVICE*|fallback:*USB\ DEVICE*|fallback:*SEMICO*|fallback:*Logitech*|fallback:*2.4G*) match=1 ;;
+          esac
+          if [ "$match" = "1" ]; then
+            case "$line" in
+              *kbd*event*)
+                for tok in $line; do
+                  case "$tok" in
+                    event*) echo "/dev/input/$tok"; return 0 ;;
+                  esac
+                done
+                ;;
+            esac
+          fi
+          ;;
+      esac
+    done < /proc/bus/input/devices
+  done
+  return 0
 }
 
 kill_pid_file() {
@@ -94,11 +108,14 @@ kill_pid_file() {
 
 stop_camera_users() {
   kill_pid_file "$PID"
+  pkill -INT hdmi_record_switcher 2>/dev/null || true
+  sleep 2
+  pkill -TERM hdmi_record_switcher 2>/dev/null || true
   pkill -TERM rk3568_camera 2>/dev/null || true
   pkill -f start_webrtc_single.sh 2>/dev/null || true
   pkill -f "/userdata/webrtc_single/mediamtx" 2>/dev/null || true
-  pkill -TERM hdmi_record_switcher 2>/dev/null || true
   sleep 1
+  pkill -KILL hdmi_record_switcher 2>/dev/null || true
   for p in $(fuser "/dev/video$CAM" 2>/dev/null || true); do
     kill "$p" 2>/dev/null || true
   done
