@@ -15,10 +15,14 @@ H.264 MP4 segments
 record directories:
 
 ```text
-/mnt/sdcard/rk3568_recordings/cam0/YYYY-MM-DD/HH-MM-SS_00000.mp4
-/mnt/sdcard/rk3568_recordings/cam1/YYYY-MM-DD/HH-MM-SS_00000.mp4
+/mnt/sdcard/rk3568_recordings/cam0/YYYY-MM-DD/HH-MM-SS.mp4
+/mnt/sdcard/rk3568_recordings/cam1/YYYY-MM-DD/HH-MM-SS.mp4
 ```
-```
+
+The board currently runs in UTC, so the recorder sets `HDMI_REC_TZ=CST-8` by
+default for file naming. `CST-8` is POSIX timezone syntax for China Standard
+Time, UTC+8. The system clock does not need to be changed for names to use
+Beijing time.
 
 ## Start
 

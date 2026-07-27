@@ -9,6 +9,7 @@ PID="$ROOT/record.pid"
 RUN="$ROOT/record.run.sh"
 BIN="${HDMI_REC_BIN:-/userdata/hdmi_record_switcher}"
 FOREGROUND="${HDMI_REC_FOREGROUND:-0}"
+REC_TZ="${HDMI_REC_TZ:-CST-8}"
 
 CAM="${HDMI_REC_CAM:-0}"
 WIDTH="${HDMI_REC_WIDTH:-1920}"
@@ -151,6 +152,7 @@ MAX_FILES=$MAX_FILES
 SD_MOUNT=$SD_MOUNT
 OUT_DIR=$OUT_DIR
 DUAL=$DUAL
+REC_TZ=$REC_TZ
 EOF
 }
 
@@ -175,7 +177,7 @@ status() {
     echo "[record] pipeline stopped"
   fi
   if [ -n "${OUT_DIR:-}" ] && [ -d "$OUT_DIR" ]; then
-    find "$OUT_DIR" -type f 2>/dev/null | tail -10 | while read -r f; do
+    find "$OUT_DIR" -type f 2>/dev/null | sort | tail -10 | while read -r f; do
       ls -lh "$f" 2>/dev/null || true
     done
   fi
@@ -213,7 +215,7 @@ start_recording() {
         HDMI_REC_WIDTH="$WIDTH" HDMI_REC_HEIGHT="$HEIGHT" HDMI_REC_FPS="$FPS" \
         HDMI_REC_BITRATE="$BITRATE" HDMI_REC_CROP_PERCENT="$CROP_PERCENT" \
         HDMI_REC_SEGMENT_SEC="$SEGMENT_SEC" HDMI_REC_MAX_FILES="$MAX_FILES" \
-        HDMI_REC_ROOT="$OUT_DIR" HDMI_REC_SD_MOUNT="$SD_MOUNT" HDMI_REC_EVENT="$EVENT_ARG" \
+        HDMI_REC_ROOT="$OUT_DIR" HDMI_REC_SD_MOUNT="$SD_MOUNT" HDMI_REC_EVENT="$EVENT_ARG" HDMI_REC_TZ="$REC_TZ" \
         "$BIN" 2>&1 | tee "$LOG"
       return 0
     fi
@@ -222,7 +224,7 @@ start_recording() {
       HDMI_REC_WIDTH="$WIDTH" HDMI_REC_HEIGHT="$HEIGHT" HDMI_REC_FPS="$FPS" \
       HDMI_REC_BITRATE="$BITRATE" HDMI_REC_CROP_PERCENT="$CROP_PERCENT" \
       HDMI_REC_SEGMENT_SEC="$SEGMENT_SEC" HDMI_REC_MAX_FILES="$MAX_FILES" \
-      HDMI_REC_ROOT="$OUT_DIR" HDMI_REC_SD_MOUNT="$SD_MOUNT" HDMI_REC_EVENT="$EVENT_ARG" \
+      HDMI_REC_ROOT="$OUT_DIR" HDMI_REC_SD_MOUNT="$SD_MOUNT" HDMI_REC_EVENT="$EVENT_ARG" HDMI_REC_TZ="$REC_TZ" \
       "$BIN" >"$LOG" 2>&1 </dev/null &
     echo $! > "$PID"
     sleep 5
@@ -238,7 +240,7 @@ start_recording() {
   stop_camera_users
   write_state
 
-  stamp="$(date +%Y%m%d_%H%M%S)"
+  stamp="$(TZ="$REC_TZ" date +%Y%m%d_%H%M%S)"
   pattern="$OUT_DIR/cam${CAM}_${stamp}_%05d.mp4"
   : > "$LOG"
 cat > "$RUN" <<EOF

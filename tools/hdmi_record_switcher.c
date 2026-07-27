@@ -13,6 +13,11 @@
 #include <unistd.h>
 
 typedef struct {
+  char dir[512];
+  char stem[64];
+} PathPattern;
+
+typedef struct {
   GstElement *pipeline;
   GstElement *selector;
   GstPad *pad0;
@@ -42,6 +47,12 @@ static int env_int(const char *name, int def) {
 static const char *env_str(const char *name, const char *def) {
   const char *v = getenv(name);
   return (v && *v) ? v : def;
+}
+
+static void setup_record_timezone(void) {
+  const char *tz = env_str("HDMI_REC_TZ", "CST-8");
+  setenv("TZ", tz, 1);
+  tzset();
 }
 
 static int mkdir_p(const char *path) {
@@ -176,12 +187,16 @@ static gboolean on_bus(GstBus *bus, GstMessage *msg, gpointer data) {
 
 static gchar *on_format_location(GstElement *splitmux, guint fragment_id, gpointer user_data) {
   (void)splitmux;
-  char *pattern = (char *)user_data;
-  return g_strdup_printf(pattern, fragment_id);
+  PathPattern *pattern = (PathPattern *)user_data;
+  if (fragment_id == 0) {
+    return g_strdup_printf("%s/%s.mp4", pattern->dir, pattern->stem);
+  }
+  return g_strdup_printf("%s/%s_%05u.mp4", pattern->dir, pattern->stem, fragment_id);
 }
 
 int main(int argc, char **argv) {
   gst_init(&argc, &argv);
+  setup_record_timezone();
 
   int width = env_int("HDMI_REC_WIDTH", 1920);
   int height = env_int("HDMI_REC_HEIGHT", 1080);
@@ -210,15 +225,19 @@ int main(int argc, char **argv) {
   strftime(date_dir, sizeof(date_dir), "%Y-%m-%d", &tmv);
   strftime(time_name, sizeof(time_name), "%H-%M-%S", &tmv);
 
-  char dir0[512], dir1[512], pattern0[512], pattern1[512];
+  char dir0[512], dir1[512];
   snprintf(dir0, sizeof(dir0), "%s/cam0/%s", root, date_dir);
   snprintf(dir1, sizeof(dir1), "%s/cam1/%s", root, date_dir);
   if (mkdir_p(dir0) != 0 || mkdir_p(dir1) != 0) {
     fprintf(stderr, "[record] cannot create output dirs under %s\n", root);
     return 1;
   }
-  snprintf(pattern0, sizeof(pattern0), "%s/%s_%%05u.mp4", dir0, time_name);
-  snprintf(pattern1, sizeof(pattern1), "%s/%s_%%05u.mp4", dir1, time_name);
+  PathPattern pattern0;
+  PathPattern pattern1;
+  snprintf(pattern0.dir, sizeof(pattern0.dir), "%s", dir0);
+  snprintf(pattern1.dir, sizeof(pattern1.dir), "%s", dir1);
+  snprintf(pattern0.stem, sizeof(pattern0.stem), "%s", time_name);
+  snprintf(pattern1.stem, sizeof(pattern1.stem), "%s", time_name);
 
   int margin_x = width * (100 - crop_percent) / 200;
   int margin_y = height * (100 - crop_percent) / 200;
@@ -261,8 +280,8 @@ int main(int argc, char **argv) {
   GstElement *mux1 = gst_bin_get_by_name(GST_BIN(app.pipeline), "mux1");
   app.pad0 = gst_element_get_static_pad(app.selector, "sink_0");
   app.pad1 = gst_element_get_static_pad(app.selector, "sink_1");
-  g_signal_connect(mux0, "format-location", G_CALLBACK(on_format_location), pattern0);
-  g_signal_connect(mux1, "format-location", G_CALLBACK(on_format_location), pattern1);
+  g_signal_connect(mux0, "format-location", G_CALLBACK(on_format_location), &pattern0);
+  g_signal_connect(mux1, "format-location", G_CALLBACK(on_format_location), &pattern1);
   snprintf(app.latest0, sizeof(app.latest0), "%s/%s_00000.mp4", dir0, time_name);
   snprintf(app.latest1, sizeof(app.latest1), "%s/%s_00000.mp4", dir1, time_name);
 
@@ -293,8 +312,9 @@ int main(int argc, char **argv) {
   signal(SIGTERM, on_signal);
   g_timeout_add(200, check_signal, &app);
 
-  fprintf(stderr, "[record] cam0 -> %s\n", pattern0);
-  fprintf(stderr, "[record] cam1 -> %s\n", pattern1);
+  fprintf(stderr, "[record] timezone: %s\n", getenv("TZ") ? getenv("TZ") : "");
+  fprintf(stderr, "[record] cam0 -> %s/%s.mp4\n", pattern0.dir, pattern0.stem);
+  fprintf(stderr, "[record] cam1 -> %s/%s.mp4\n", pattern1.dir, pattern1.stem);
   fprintf(stderr, "[record] HDMI keys: 1=cam0 2=cam1 3=latest paths q=quit\n");
 
   switch_to(&app, 0);
