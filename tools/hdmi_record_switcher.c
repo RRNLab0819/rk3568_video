@@ -7,7 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -32,6 +34,11 @@ typedef struct {
   int stdin_fd;
   struct termios old_termios;
   gboolean termios_set;
+  int webrtc_enabled;
+  int webrtc_fd0;
+  int webrtc_fd1;
+  pid_t ffmpeg0;
+  pid_t ffmpeg1;
   char latest0[512];
   char latest1[512];
 } App;
@@ -52,6 +59,12 @@ static int env_int(const char *name, int def) {
 static const char *env_str(const char *name, const char *def) {
   const char *v = getenv(name);
   return (v && *v) ? v : def;
+}
+
+static int env_bool(const char *name, int def) {
+  const char *v = getenv(name);
+  if (!v || !*v) return def;
+  return strcmp(v, "0") != 0 && strcasecmp(v, "false") != 0 && strcasecmp(v, "no") != 0;
 }
 
 static void setup_record_timezone(void) {
@@ -121,6 +134,60 @@ static void request_stop(App *app) {
   app->eos_sent = TRUE;
   fprintf(stderr, "[record] stopping, finalizing MP4 files...\n");
   gst_element_send_event(app->pipeline, gst_event_new_eos());
+}
+
+static pid_t start_ffmpeg_publisher(int cam, int fps, const char *rtsp_base, int *write_fd) {
+  int pipefd[2];
+  if (pipe(pipefd) != 0) {
+    fprintf(stderr, "[webrtc] pipe failed cam%d: %s\n", cam, strerror(errno));
+    return -1;
+  }
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    fprintf(stderr, "[webrtc] fork failed cam%d: %s\n", cam, strerror(errno));
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return -1;
+  }
+
+  if (pid == 0) {
+    char url[256];
+    char fps_str[16];
+    snprintf(url, sizeof(url), "%s/cam%d", rtsp_base, cam);
+    snprintf(fps_str, sizeof(fps_str), "%d", fps);
+    dup2(pipefd[0], STDIN_FILENO);
+    close(pipefd[0]);
+    close(pipefd[1]);
+    execlp("ffmpeg", "ffmpeg",
+           "-hide_banner", "-loglevel", "warning",
+           "-fflags", "+genpts+nobuffer", "-flags", "low_delay",
+           "-r", fps_str, "-f", "h264", "-i", "pipe:0",
+           "-c:v", "copy", "-an",
+           "-f", "rtsp", "-rtsp_transport", "tcp",
+           "-muxdelay", "0", "-muxpreload", "0", "-pkt_size", "1200",
+           url, (char *)NULL);
+    fprintf(stderr, "[webrtc] exec ffmpeg failed cam%d: %s\n", cam, strerror(errno));
+    _exit(127);
+  }
+
+  close(pipefd[0]);
+  *write_fd = pipefd[1];
+  fprintf(stderr, "[webrtc] cam%d publisher pid=%d -> %s/cam%d\n", cam, (int)pid, rtsp_base, cam);
+  return pid;
+}
+
+static void stop_ffmpeg_publisher(pid_t pid, int fd) {
+  if (fd >= 0) close(fd);
+  if (pid > 0) {
+    kill(pid, SIGTERM);
+    for (int i = 0; i < 10; ++i) {
+      if (waitpid(pid, NULL, WNOHANG) == pid) return;
+      usleep(100000);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+  }
 }
 
 static void print_playback(App *app) {
@@ -254,6 +321,8 @@ int main(int argc, char **argv) {
   int crop_percent = env_int("HDMI_REC_CROP_PERCENT", 80);
   int segment_sec = env_int("HDMI_REC_SEGMENT_SEC", 60);
   int max_files = env_int("HDMI_REC_MAX_FILES", 0);
+  int webrtc_enabled = env_bool("HDMI_REC_WEBRTC", 0);
+  const char *rtsp_base = env_str("HDMI_REC_RTSP_BASE", "rtsp://127.0.0.1:8554");
   const char *root = env_str("HDMI_REC_ROOT", "/mnt/sdcard/rk3568_recordings");
   const char *sd_mount = env_str("HDMI_REC_SD_MOUNT", "/mnt/sdcard");
   const char *event_dev = env_str("HDMI_REC_EVENT", "");
@@ -303,35 +372,79 @@ int main(int argc, char **argv) {
   int margin_y = height * (100 - crop_percent) / 200;
   long long segment_ns = (long long)segment_sec * 1000000000LL;
 
-  char desc[8192];
+  GError *err = NULL;
+  App app;
+  memset(&app, 0, sizeof(app));
+  app.webrtc_enabled = webrtc_enabled;
+  app.webrtc_fd0 = -1;
+  app.webrtc_fd1 = -1;
+  app.ffmpeg0 = -1;
+  app.ffmpeg1 = -1;
+
+  if (webrtc_enabled) {
+    app.ffmpeg0 = start_ffmpeg_publisher(0, fps, rtsp_base, &app.webrtc_fd0);
+    app.ffmpeg1 = start_ffmpeg_publisher(1, fps, rtsp_base, &app.webrtc_fd1);
+    if (app.ffmpeg0 <= 0 || app.ffmpeg1 <= 0) {
+      stop_ffmpeg_publisher(app.ffmpeg0, app.webrtc_fd0);
+      stop_ffmpeg_publisher(app.ffmpeg1, app.webrtc_fd1);
+      return 1;
+    }
+  }
+
+  char enc0_tail[2048];
+  char enc1_tail[2048];
+  if (webrtc_enabled) {
+    snprintf(enc0_tail, sizeof(enc0_tail),
+      "! mpph264enc bps=%d bps-min=%d bps-max=%d rc-mode=cbr profile=baseline max-pending=1 gop=%d header-mode=1 "
+      "! tee name=h0 "
+      "h0. ! queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 "
+      "! h264parse config-interval=1 ! splitmuxsink name=mux0 muxer-factory=mp4mux async-finalize=true max-size-time=%lld max-files=%d send-keyframe-requests=true "
+      "h0. ! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+      "! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au "
+      "! fdsink fd=%d sync=false",
+      bitrate, bitrate, bitrate, fps, segment_ns, max_files, app.webrtc_fd0);
+    snprintf(enc1_tail, sizeof(enc1_tail),
+      "! mpph264enc bps=%d bps-min=%d bps-max=%d rc-mode=cbr profile=baseline max-pending=1 gop=%d header-mode=1 "
+      "! tee name=h1 "
+      "h1. ! queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 "
+      "! h264parse config-interval=1 ! splitmuxsink name=mux1 muxer-factory=mp4mux async-finalize=true max-size-time=%lld max-files=%d send-keyframe-requests=true "
+      "h1. ! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+      "! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au "
+      "! fdsink fd=%d sync=false",
+      bitrate, bitrate, bitrate, fps, segment_ns, max_files, app.webrtc_fd1);
+  } else {
+    snprintf(enc0_tail, sizeof(enc0_tail),
+      "! mpph264enc bps=%d bps-min=%d bps-max=%d rc-mode=cbr profile=baseline max-pending=1 gop=%d header-mode=1 "
+      "! h264parse config-interval=1 ! splitmuxsink name=mux0 muxer-factory=mp4mux async-finalize=true max-size-time=%lld max-files=%d send-keyframe-requests=true",
+      bitrate, bitrate, bitrate, fps, segment_ns, max_files);
+    snprintf(enc1_tail, sizeof(enc1_tail),
+      "! mpph264enc bps=%d bps-min=%d bps-max=%d rc-mode=cbr profile=baseline max-pending=1 gop=%d header-mode=1 "
+      "! h264parse config-interval=1 ! splitmuxsink name=mux1 muxer-factory=mp4mux async-finalize=true max-size-time=%lld max-files=%d send-keyframe-requests=true",
+      bitrate, bitrate, bitrate, fps, segment_ns, max_files);
+  }
+
+  char desc[12288];
   snprintf(desc, sizeof(desc),
     "input-selector name=sel ! queue leaky=downstream max-size-buffers=2 ! waylandsink fullscreen=true sync=false qos=true "
     "v4l2src device=/dev/video0 io-mode=mmap do-timestamp=true ! video/x-raw,format=NV12,width=%d,height=%d,framerate=%d/1 "
     "! videocrop left=%d right=%d top=%d bottom=%d ! videoscale ! videorate drop-only=true "
     "! video/x-raw,format=NV12,width=%d,height=%d,framerate=%d/1 ! tee name=t0 "
     "t0. ! queue leaky=downstream max-size-buffers=2 ! sel.sink_0 "
-    "t0. ! queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 "
-    "! mpph264enc bps=%d bps-min=%d bps-max=%d rc-mode=cbr profile=baseline max-pending=1 gop=%d header-mode=1 "
-    "! h264parse config-interval=1 ! splitmuxsink name=mux0 muxer-factory=mp4mux async-finalize=true max-size-time=%lld max-files=%d send-keyframe-requests=true "
+    "t0. ! queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 %s "
     "v4l2src device=/dev/video1 io-mode=mmap do-timestamp=true ! video/x-raw,format=NV12,width=%d,height=%d,framerate=%d/1 "
     "! videocrop left=%d right=%d top=%d bottom=%d ! videoscale ! videorate drop-only=true "
     "! video/x-raw,format=NV12,width=%d,height=%d,framerate=%d/1 ! tee name=t1 "
     "t1. ! queue leaky=downstream max-size-buffers=2 ! sel.sink_1 "
-    "t1. ! queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 "
-    "! mpph264enc bps=%d bps-min=%d bps-max=%d rc-mode=cbr profile=baseline max-pending=1 gop=%d header-mode=1 "
-    "! h264parse config-interval=1 ! splitmuxsink name=mux1 muxer-factory=mp4mux async-finalize=true max-size-time=%lld max-files=%d send-keyframe-requests=true",
-    width, height, fps, margin_x, margin_x, margin_y, margin_y, width, height, fps,
-    bitrate, bitrate, bitrate, fps, segment_ns, max_files,
-    width, height, fps, margin_x, margin_x, margin_y, margin_y, width, height, fps,
-    bitrate, bitrate, bitrate, fps, segment_ns, max_files);
+    "t1. ! queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 %s",
+    width, height, fps, margin_x, margin_x, margin_y, margin_y, width, height, fps, enc0_tail,
+    width, height, fps, margin_x, margin_x, margin_y, margin_y, width, height, fps, enc1_tail);
 
-  GError *err = NULL;
-  App app;
-  memset(&app, 0, sizeof(app));
   app.pipeline = gst_parse_launch(desc, &err);
   if (!app.pipeline) {
     fprintf(stderr, "[gst] parse failed: %s\n", err ? err->message : "unknown");
     if (err) g_error_free(err);
+    stop_ffmpeg_publisher(app.ffmpeg0, app.webrtc_fd0);
+    stop_ffmpeg_publisher(app.ffmpeg1, app.webrtc_fd1);
     return 1;
   }
 
@@ -365,6 +478,9 @@ int main(int argc, char **argv) {
   fprintf(stderr, "[record] cam0 -> %s/cam0/%s/<start>_<end>.mp4\n", pattern0.root, date_dir);
   fprintf(stderr, "[record] cam1 -> %s/cam1/%s/<start>_<end>.mp4\n", pattern1.root, date_dir);
   fprintf(stderr, "[record] HDMI keys: 1=cam0 2=cam1 3=latest paths q=quit\n");
+  if (webrtc_enabled) {
+    fprintf(stderr, "[webrtc] enabled: %s/cam0 and %s/cam1\n", rtsp_base, rtsp_base);
+  }
 
   switch_to(&app, 0);
   gst_element_set_state(app.pipeline, GST_STATE_PLAYING);
@@ -380,5 +496,7 @@ int main(int argc, char **argv) {
   if (mux1) gst_object_unref(mux1);
   if (app.pipeline) gst_object_unref(app.pipeline);
   if (app.loop) g_main_loop_unref(app.loop);
+  stop_ffmpeg_publisher(app.ffmpeg0, app.webrtc_fd0);
+  stop_ffmpeg_publisher(app.ffmpeg1, app.webrtc_fd1);
   return 0;
 }

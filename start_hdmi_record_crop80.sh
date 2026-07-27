@@ -23,6 +23,8 @@ MAX_FILES="${HDMI_REC_MAX_FILES:-0}"
 OUT_BASE="${HDMI_REC_DIR:-}"
 SD_MOUNT="${HDMI_REC_SD_MOUNT:-/mnt/sdcard}"
 DUAL="${HDMI_REC_DUAL:-1}"
+WEBRTC="${HDMI_REC_WEBRTC:-0}"
+KEEP_MEDIAMTX="${HDMI_REC_KEEP_MEDIAMTX:-0}"
 
 mkdir -p "$ROOT"
 
@@ -127,7 +129,9 @@ stop_camera_users() {
   pkill -TERM hdmi_record_switcher 2>/dev/null || true
   pkill -TERM rk3568_camera 2>/dev/null || true
   pkill -f start_webrtc_single.sh 2>/dev/null || true
-  pkill -f "/userdata/webrtc_single/mediamtx" 2>/dev/null || true
+  if [ "$KEEP_MEDIAMTX" != "1" ]; then
+    pkill -f "/userdata/webrtc_single/mediamtx" 2>/dev/null || true
+  fi
   sleep 1
   pkill -KILL hdmi_record_switcher 2>/dev/null || true
   for p in $(fuser "/dev/video$CAM" 2>/dev/null || true); do
@@ -166,6 +170,7 @@ SD_MOUNT=$SD_MOUNT
 OUT_DIR=$OUT_DIR
 DUAL=$DUAL
 REC_TZ=$REC_TZ
+WEBRTC=$WEBRTC
 EOF
 }
 
@@ -181,6 +186,11 @@ status() {
   echo "[record] stream: cam$CAM ${WIDTH}x${HEIGHT}@${FPS} bitrate=$BITRATE crop=${CROP_PERCENT}%"
   if [ "${DUAL:-0}" = "1" ]; then
     echo "[record] dual: cam0 + cam1, HDMI keys 1=cam0 2=cam1 3=latest"
+  fi
+  if [ "${WEBRTC:-0}" != "0" ]; then
+    ip="$(ip addr show wlan0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)"
+    [ -n "$ip" ] || ip="127.0.0.1"
+    echo "[record] WebRTC: cam0=http://$ip:8889/cam0/whep cam1=http://$ip:8889/cam1/whep"
   fi
   echo "[record] dir: ${OUT_DIR:-unknown}"
   echo "[record] log: $LOG"
@@ -229,6 +239,7 @@ start_recording() {
         HDMI_REC_BITRATE="$BITRATE" HDMI_REC_CROP_PERCENT="$CROP_PERCENT" \
         HDMI_REC_SEGMENT_SEC="$SEGMENT_SEC" HDMI_REC_MAX_FILES="$MAX_FILES" \
         HDMI_REC_ROOT="$OUT_DIR" HDMI_REC_SD_MOUNT="$SD_MOUNT" HDMI_REC_EVENT="$EVENT_ARG" HDMI_REC_TZ="$REC_TZ" \
+        HDMI_REC_WEBRTC="$WEBRTC" HDMI_REC_RTSP_BASE="${HDMI_REC_RTSP_BASE:-rtsp://127.0.0.1:8554}" \
         "$BIN" 2>&1 | tee "$LOG"
       return 0
     fi
@@ -238,6 +249,7 @@ start_recording() {
       HDMI_REC_BITRATE="$BITRATE" HDMI_REC_CROP_PERCENT="$CROP_PERCENT" \
       HDMI_REC_SEGMENT_SEC="$SEGMENT_SEC" HDMI_REC_MAX_FILES="$MAX_FILES" \
       HDMI_REC_ROOT="$OUT_DIR" HDMI_REC_SD_MOUNT="$SD_MOUNT" HDMI_REC_EVENT="$EVENT_ARG" HDMI_REC_TZ="$REC_TZ" \
+      HDMI_REC_WEBRTC="$WEBRTC" HDMI_REC_RTSP_BASE="${HDMI_REC_RTSP_BASE:-rtsp://127.0.0.1:8554}" \
       "$BIN" >"$LOG" 2>&1 </dev/null &
     echo $! > "$PID"
     sleep 5
