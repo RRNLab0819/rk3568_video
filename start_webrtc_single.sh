@@ -82,7 +82,9 @@ start_mediamtx() {
     echo "[webrtc] missing executable: $MEDIAMTX"
     exit 1
   fi
-  cat > "$CONF" <<'EOF'
+  ice_host="$(board_ip)"
+  [ -n "$ice_host" ] || ice_host="127.0.0.1"
+  cat > "$CONF" <<EOF
 logLevel: info
 rtsp: true
 rtspAddress: :8554
@@ -91,6 +93,7 @@ hls: false
 webrtc: true
 webrtcAddress: :8889
 webrtcAllowOrigins: ['*']
+webrtcAdditionalHosts: [$ice_host]
 srt: false
 api: false
 metrics: false
@@ -168,11 +171,11 @@ gst-launch-1.0 -q -e \\
   v4l2src device="/dev/video$CAM" io-mode=mmap \\
   ! video/x-raw,format=NV12,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 \\
   ! queue leaky=downstream max-size-buffers=3 max-size-time=0 max-size-bytes=0 \\
-  ! mpph264enc bps=$BITRATE rc-mode=cbr gop=$GOP header-mode=1 \\
+  ! mpph264enc bps=$BITRATE rc-mode=cbr profile=baseline max-pending=1 gop=$GOP header-mode=1 \\
   ! h264parse config-interval=1 \\
   ! filesink location=/dev/stdout 2>>"$LOG" \\
-| ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -use_wallclock_as_timestamps 1 \\
-    -f h264 -i pipe:0 -c:v copy -an \\
+| ffmpeg -hide_banner -loglevel warning -fflags +genpts+nobuffer -flags low_delay \\
+    -r $FPS -f h264 -i pipe:0 -c:v copy -an \\
     -f rtsp -rtsp_transport tcp -muxdelay 0 -muxpreload 0 -pkt_size 1200 \\
     "rtsp://127.0.0.1:8554/$PATH_NAME" >>"$LOG" 2>&1
 EOF
