@@ -9,12 +9,20 @@ STATE="$ROOT/state.env"
 
 CAM="${WEBRTC_CAM:-0}"
 PATH_NAME="${WEBRTC_PATH:-cam0}"
-WIDTH="${WEBRTC_WIDTH:-1280}"
-HEIGHT="${WEBRTC_HEIGHT:-720}"
-FPS="${WEBRTC_FPS:-25}"
-BITRATE="${WEBRTC_BITRATE:-1500000}"
-GOP="${WEBRTC_GOP:-25}"
+WIDTH="${WEBRTC_WIDTH:-1920}"
+HEIGHT="${WEBRTC_HEIGHT:-1080}"
+FPS="${WEBRTC_FPS:-15}"
+BITRATE="${WEBRTC_BITRATE:-2000000}"
+GOP="${WEBRTC_GOP:-15}"
+CROP_PERCENT="${WEBRTC_CROP_PERCENT:-80}"
 PAUSE_RECOVERY="${WEBRTC_PAUSE_RECOVERY:-1}"
+
+if [ "$CROP_PERCENT" -lt 50 ] || [ "$CROP_PERCENT" -gt 100 ]; then
+  echo "[webrtc] WEBRTC_CROP_PERCENT must be between 50 and 100"
+  exit 2
+fi
+CROP_MARGIN_X=$(( WIDTH * (100 - CROP_PERCENT) / 200 ))
+CROP_MARGIN_Y=$(( HEIGHT * (100 - CROP_PERCENT) / 200 ))
 
 mkdir -p "$ROOT"
 
@@ -129,6 +137,9 @@ HEIGHT=$HEIGHT
 FPS=$FPS
 BITRATE=$BITRATE
 GOP=$GOP
+CROP_PERCENT=$CROP_PERCENT
+CROP_MARGIN_X=$CROP_MARGIN_X
+CROP_MARGIN_Y=$CROP_MARGIN_Y
 PAUSE_RECOVERY=$PAUSE_RECOVERY
 EOF
 }
@@ -137,7 +148,7 @@ status() {
   load_state
   ip="$(board_ip)"
   [ -n "$ip" ] || ip="127.0.0.1"
-  echo "[webrtc] stream: cam$CAM ${WIDTH}x${HEIGHT}@${FPS} bitrate=$BITRATE gop=$GOP"
+  echo "[webrtc] stream: cam$CAM ${WIDTH}x${HEIGHT}@${FPS} bitrate=$BITRATE gop=$GOP crop=${CROP_PERCENT}%"
   echo "[webrtc] WHEP: http://$ip:8889/$PATH_NAME/whep"
   if [ -f "$PID" ] && kill -0 "$(cat "$PID" 2>/dev/null)" 2>/dev/null; then
     echo "[webrtc] publisher alive pid=$(cat "$PID") log=$LOG"
@@ -169,6 +180,9 @@ case "$ACTION" in
 #!/bin/sh
 gst-launch-1.0 -q -e \\
   v4l2src device="/dev/video$CAM" io-mode=mmap \\
+  ! video/x-raw,format=NV12,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 \\
+  ! videocrop left=$CROP_MARGIN_X right=$CROP_MARGIN_X top=$CROP_MARGIN_Y bottom=$CROP_MARGIN_Y \\
+  ! videoscale \\
   ! video/x-raw,format=NV12,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 \\
   ! queue leaky=downstream max-size-buffers=3 max-size-time=0 max-size-bytes=0 \\
   ! mpph264enc bps=$BITRATE rc-mode=cbr profile=baseline max-pending=1 gop=$GOP header-mode=1 \\

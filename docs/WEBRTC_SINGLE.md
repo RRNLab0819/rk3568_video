@@ -13,15 +13,17 @@ cd /userdata
 Default stream:
 
 ```text
-cam0, 1280x720, 25 fps, H.264, 1.5 Mbps
+cam0, 1920x1080, 15 fps, H.264, 2 Mbps
+center 80% crop, scaled back to 1920x1080
 ```
 
 ## Tune Without Editing
 
 ```sh
 WEBRTC_CAM=1 WEBRTC_PATH=cam1 ./start_webrtc_single.sh start
-WEBRTC_WIDTH=1920 WEBRTC_HEIGHT=1080 WEBRTC_FPS=25 WEBRTC_BITRATE=2000000 ./start_webrtc_single.sh start
-WEBRTC_BITRATE=1000000 ./start_webrtc_single.sh start
+WEBRTC_CROP_PERCENT=90 ./start_webrtc_single.sh start
+WEBRTC_WIDTH=1280 WEBRTC_HEIGHT=720 WEBRTC_FPS=25 WEBRTC_BITRATE=1500000 WEBRTC_CROP_PERCENT=100 ./start_webrtc_single.sh start
+WEBRTC_BITRATE=2500000 ./start_webrtc_single.sh start
 ```
 
 ## Status And Logs
